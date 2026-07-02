@@ -380,7 +380,7 @@ export default function Home() {
             <Field label="Notes">
               <textarea
                 className={inputClass}
-                rows={3}
+                rows={12}
                 value={form.notes}
                 onChange={(e) => setField("notes", e.target.value)}
                 placeholder="Referral contact, deadline, why you want it…"

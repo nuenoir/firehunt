@@ -53,7 +53,10 @@ export default function Bookmarklet() {
       // --- 3) Full 'About the job' text: from JobPosting HTML, else from the page's description box ---
       "var body='';" +
       "if(desc){var h=desc.replace(/<(br|\\/p|\\/li|\\/h[1-6]|\\/div)[^>]*>/gi,'\\n');var tmp=d.createElement('div');tmp.innerHTML=h;body=tmp.textContent||'';}" +
-      "else{var el=d.querySelector('#job-details,.jobs-description__content,.jobs-box__html-content,.jobs-description-content__text,.show-more-less-html__markup,.description__text');if(el)body=el.innerText||el.textContent||'';}" +
+      "if(!body){var el=d.querySelector('#job-details,.jobs-description__content,.jobs-box__html-content,.jobs-description-content__text,.show-more-less-html__markup,.description__text');if(el&&(el.innerText||'').length>80)body=el.innerText||el.textContent||'';}" +
+      // LinkedIn hides the description from the tags above, so recover it from the visible
+      // 'About the job' section and trim the unrelated listings that follow it.
+      "if(!body){var bt=(d.body&&d.body.innerText)||'';var mi=bt.search(/About the job|Job description|About this job|Role overview/i);if(mi>-1){var tail=bt.slice(mi);var st=tail.search(/\\n(Similar jobs|People also viewed|More jobs|Jobs you may be interested in|See more jobs|Set alert)/i);if(st>0)tail=tail.slice(0,st);body=tail;}}" +
       "body=body.replace(/[ \\t]+/g,' ').replace(/\\n[ \\t]+/g,'\\n').replace(/\\n{3,}/g,'\\n\\n').trim().slice(0,5000);" +
       // --- 4) Pull email / phone contacts out of the description so you can reach out directly ---
       "function uq(a){var o={},r=[];for(var i=0;i<a.length;i++){var k=(a[i]||'').trim();if(k&&!o[k]){o[k]=1;r.push(k);}}return r;}" +
@@ -121,11 +124,11 @@ export default function Bookmarklet() {
             </li>
             <li>Drag the orange button above onto that bar.</li>
             <li>
-              On a job page, <strong>highlight the &ldquo;About the job&rdquo;
-              text</strong> first &mdash; especially on LinkedIn, which hides
-              its details from scripts &mdash; then click the bookmark. FireHunt
-              opens pre-filled, with any emails or phone numbers from your
-              highlight lifted to the top. Review and hit Save.
+              On a job page, just <strong>click the bookmark</strong> &mdash;
+              FireHunt opens pre-filled with the title, company, the
+              &ldquo;About the job&rdquo; text, and any email or phone contacts
+              found in it. If a stubborn site still comes up blank, highlight the
+              description first and then click. Review and hit Save.
             </li>
           </ol>
 

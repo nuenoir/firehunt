@@ -13,6 +13,7 @@ import {
   type JobStatus,
 } from "@/lib/jobs";
 import { ADZUNA_COUNTRIES, type AdzunaJob } from "@/lib/adzuna";
+import { GULF_LOCATIONS } from "@/lib/jooble";
 import CvManager from "@/app/CvManager";
 import InsightsManager from "@/app/InsightsManager";
 import PrepPrompt from "@/app/PrepPrompt";
@@ -61,7 +62,9 @@ export default function Home() {
 
   // Adzuna search
   const [showSearch, setShowSearch] = useState(false);
-  const [sCountry, setSCountry] = useState(ADZUNA_COUNTRIES[0].code);
+  // Search target, encoded as "provider:value" — e.g. "jooble:United Arab
+  // Emirates" (Gulf) or "adzuna:au". Default to a Gulf country.
+  const [sTarget, setSTarget] = useState("jooble:United Arab Emirates");
   const [sWhat, setSWhat] = useState("");
   const [sWhere, setSWhere] = useState("");
   const [searching, setSearching] = useState(false);
@@ -163,17 +166,28 @@ export default function Home() {
   }
 
   // Ask our own /api/adzuna endpoint for real jobs, then show them.
+  // Split "provider:value" into its two parts.
+  function searchProviderAndValue() {
+    const sep = sTarget.indexOf(":");
+    return { provider: sTarget.slice(0, sep), value: sTarget.slice(sep + 1) };
+  }
+
   async function runSearch(e: React.FormEvent) {
     e.preventDefault();
     setSearching(true);
     setSearchError("");
     try {
-      const params = new URLSearchParams({
-        country: sCountry,
-        what: sWhat,
-        where: sWhere,
-      });
-      const res = await fetch(`/api/adzuna?${params.toString()}`);
+      const { provider, value } = searchProviderAndValue();
+      let url: string;
+      if (provider === "jooble") {
+        // Jooble's Gulf data only resolves by COUNTRY, not city — so keep the
+        // country as the location and fold any typed city into the keywords.
+        const keywords = sWhere.trim() ? `${sWhat} ${sWhere.trim()}`.trim() : sWhat;
+        url = `/api/jooble?${new URLSearchParams({ what: keywords, location: value }).toString()}`;
+      } else {
+        url = `/api/adzuna?${new URLSearchParams({ country: value, what: sWhat, where: sWhere }).toString()}`;
+      }
+      const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) {
         setSearchError(data.error || "Search failed. Please try again.");
@@ -190,9 +204,16 @@ export default function Home() {
   }
 
   // Copy a search result into your own board as a new job.
+  function currentTargetLabel(): string {
+    const { provider, value } = searchProviderAndValue();
+    if (provider === "jooble") {
+      return GULF_LOCATIONS.find((g) => g.location === value)?.label ?? value;
+    }
+    return ADZUNA_COUNTRIES.find((c) => c.code === value)?.label ?? value;
+  }
+
   function importAdzunaJob(a: AdzunaJob) {
-    const countryLabel =
-      ADZUNA_COUNTRIES.find((c) => c.code === sCountry)?.label ?? sCountry;
+    const countryLabel = currentTargetLabel();
     const job: Job = {
       id: crypto.randomUUID(),
       title: a.title,
@@ -406,14 +427,23 @@ export default function Home() {
             <Field label="Country">
               <select
                 className={inputClass}
-                value={sCountry}
-                onChange={(e) => setSCountry(e.target.value)}
+                value={sTarget}
+                onChange={(e) => setSTarget(e.target.value)}
               >
-                {ADZUNA_COUNTRIES.map((c) => (
-                  <option key={c.code} value={c.code}>
-                    {c.label}
-                  </option>
-                ))}
+                <optgroup label="Gulf (via Jooble)">
+                  {GULF_LOCATIONS.map((g) => (
+                    <option key={g.location} value={`jooble:${g.location}`}>
+                      {g.label}
+                    </option>
+                  ))}
+                </optgroup>
+                <optgroup label="Adzuna (Australia, Singapore, Europe…)">
+                  {ADZUNA_COUNTRIES.map((c) => (
+                    <option key={c.code} value={`adzuna:${c.code}`}>
+                      {c.label}
+                    </option>
+                  ))}
+                </optgroup>
               </select>
             </Field>
             <Field label="City (optional)">
@@ -436,9 +466,10 @@ export default function Home() {
           </form>
 
           <p className="mt-3 text-xs text-zinc-500">
-            Adzuna covers Australia, Singapore, the Netherlands, and Western
-            Europe — not the Gulf. Add Gulf roles by hand with the Add a job
-            button.
+            Gulf countries (UAE, Saudi, Qatar…) search via Jooble; Australia,
+            Singapore and Europe via Adzuna. Gulf results are matched by country
+            (a typed city becomes an extra keyword). Jooble has limited free Gulf
+            data, so use the bookmarklet or Add a job for anything it misses.
           </p>
 
           {searchError && (

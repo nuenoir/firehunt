@@ -114,7 +114,7 @@ export default function Home() {
       company: params.get("fh_company") ?? "",
       url: url ?? "",
       salary: params.get("fh_salary") ?? "",
-      notes: params.get("fh_notes") ?? "",
+      notes: cleanCapturedNotes(params.get("fh_notes") ?? ""),
     });
     setView("jobs");
     setShowForm(true);
@@ -608,6 +608,29 @@ export default function Home() {
   );
 }
 
+/** Strip LinkedIn's trailing "…more" / "see more" toggle text from a captured note. */
+function cleanCapturedNotes(s: string): string {
+  return s
+    .replace(/\s*(?:…|\.\.\.)\s*(?:more|less)\s*$/i, "")
+    .replace(/\n\s*(?:see|show)\s+(?:more|less)\s*$/i, "")
+    .trim();
+}
+
+/** Pull email + phone contacts out of a job's notes so they can be shown up front. */
+function extractContacts(text: string): { emails: string[]; phones: string[] } {
+  if (!text) return { emails: [], phones: [] };
+  const uniq = (a: string[]) =>
+    Array.from(new Set(a.map((s) => s.trim()).filter(Boolean)));
+  const emails = text.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g) || [];
+  const phones = (
+    text.match(/(\+\d[\d ().\-]{6,}\d)|(\b0\d[\d ().\-]{7,}\d)/g) || []
+  ).filter((p) => {
+    const g = p.replace(/\D/g, "");
+    return g.length >= 8 && g.length <= 15;
+  });
+  return { emails: uniq(emails), phones: uniq(phones) };
+}
+
 /** A labelled form field wrapper. */
 function Field({
   label,
@@ -641,6 +664,9 @@ function JobCard({
   // Only treat a CV as attached if it still exists in the list.
   const attachedId =
     job.cvId && cvs.some((c) => c.id === job.cvId) ? job.cvId : "";
+  // Contacts lifted out of the notes, shown up front so you don't have to scroll.
+  const contacts = extractContacts(job.notes);
+  const hasContacts = contacts.emails.length > 0 || contacts.phones.length > 0;
   return (
     <article className="rounded-xl border border-white/10 bg-white/5 p-3.5 transition hover:border-white/20">
       <div className="flex items-start justify-between gap-2">
@@ -657,6 +683,31 @@ function JobCard({
         </button>
       </div>
       <p className="mt-0.5 text-sm text-zinc-400">{job.company}</p>
+
+      {hasContacts && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+          {contacts.emails.map((e) => (
+            <a
+              key={e}
+              href={`mailto:${e}`}
+              title={`Email ${e}`}
+              className="max-w-full truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
+            >
+              ✉ {e}
+            </a>
+          ))}
+          {contacts.phones.map((p) => (
+            <a
+              key={p}
+              href={`tel:${p.replace(/\s+/g, "")}`}
+              title={`Call ${p}`}
+              className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
+            >
+              ☎ {p}
+            </a>
+          ))}
+        </div>
+      )}
 
       <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
         <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-zinc-300">

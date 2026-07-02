@@ -42,8 +42,14 @@ export default function Bookmarklet() {
       "if(a)loc=[nm(a.addressLocality),nm(a.addressRegion),nm(a.addressCountry)].filter(Boolean).join(', ');}" +
       "desc=o.description||'';break;}}}catch(e){}" +
       // --- 2) Fallbacks for title/company when JobPosting data is missing ---
-      "if(!t){var ot=d.querySelector('meta[property=\"og:title\"]');t=(ot&&ot.content)||d.title||'';}" +
-      "if(!c){var os=d.querySelector('meta[property=\"og:site_name\"]');c=(os&&os.content)||'';}" +
+      "if(!t){var ot=d.querySelector('meta[property=\"og:title\"]');t=(ot&&ot.content)||'';}" +
+      // Many sites bake job + employer into the page title, e.g. LinkedIn's
+      // 'Job Title | Company | LinkedIn'. Split it to recover both.
+      "if((!t||!c)&&d.title&&d.title.indexOf(' | ')>-1){var sg=d.title.split(' | ').map(function(x){return x.trim();}).filter(Boolean);" +
+      "if(sg.length>1&&/^(linkedin|indeed|glassdoor|seek|bayt|gulftalent|naukrigulf|monster|ziprecruiter)$/i.test(sg[sg.length-1]))sg.pop();" +
+      "if(!t&&sg[0])t=sg[0];if(!c&&sg[1])c=sg[1];}" +
+      "if(!c){var os=d.querySelector('meta[property=\"og:site_name\"]');if(os&&os.content&&!/^(linkedin|indeed|glassdoor)$/i.test(os.content))c=os.content;}" +
+      "if(!t)t=d.title||'';" +
       // --- 3) Full 'About the job' text: from JobPosting HTML, else from the page's description box ---
       "var body='';" +
       "if(desc){var h=desc.replace(/<(br|\\/p|\\/li|\\/h[1-6]|\\/div)[^>]*>/gi,'\\n');var tmp=d.createElement('div');tmp.innerHTML=h;body=tmp.textContent||'';}" +
@@ -115,9 +121,11 @@ export default function Bookmarklet() {
             </li>
             <li>Drag the orange button above onto that bar.</li>
             <li>
-              On any job page, optionally highlight the description, then click
-              the bookmark. FireHunt opens with the job pre-filled — review and
-              hit Save.
+              On a job page, <strong>highlight the &ldquo;About the job&rdquo;
+              text</strong> first &mdash; especially on LinkedIn, which hides
+              its details from scripts &mdash; then click the bookmark. FireHunt
+              opens pre-filled, with any emails or phone numbers from your
+              highlight lifted to the top. Review and hit Save.
             </li>
           </ol>
 

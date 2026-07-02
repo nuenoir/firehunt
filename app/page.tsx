@@ -113,6 +113,7 @@ export default function Home() {
       title: title ?? "",
       company: params.get("fh_company") ?? "",
       url: url ?? "",
+      salary: params.get("fh_salary") ?? "",
       notes: params.get("fh_notes") ?? "",
     });
     setView("jobs");

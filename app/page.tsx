@@ -126,6 +126,9 @@ export default function Home() {
     [jobs, country, query],
   );
 
+  // Contacts detected in the add-job form's notes, shown up front while editing.
+  const formContacts = extractContacts(form.notes);
+
   function setField<K extends keyof typeof form>(
     key: K,
     value: (typeof form)[K],
@@ -376,6 +379,18 @@ export default function Home() {
               placeholder="e.g. AED 30,000/mo"
             />
           </Field>
+          {(formContacts.emails.length > 0 ||
+            formContacts.phones.length > 0) && (
+            <div className="flex flex-col gap-1.5 sm:col-span-2">
+              <span className="text-sm font-medium text-zinc-300">
+                Contacts found in this job
+              </span>
+              <ContactChips
+                emails={formContacts.emails}
+                phones={formContacts.phones}
+              />
+            </div>
+          )}
           <div className="sm:col-span-2">
             <Field label="Notes">
               <textarea
@@ -631,6 +646,40 @@ function extractContacts(text: string): { emails: string[]; phones: string[] } {
   return { emails: uniq(emails), phones: uniq(phones) };
 }
 
+/** Clickable email / phone chips, shared by the add-job form and job cards. */
+function ContactChips({
+  emails,
+  phones,
+}: {
+  emails: string[];
+  phones: string[];
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-xs">
+      {emails.map((e) => (
+        <a
+          key={e}
+          href={`mailto:${e}`}
+          title={`Email ${e}`}
+          className="max-w-full truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
+        >
+          ✉ {e}
+        </a>
+      ))}
+      {phones.map((p) => (
+        <a
+          key={p}
+          href={`tel:${p.replace(/\s+/g, "")}`}
+          title={`Call ${p}`}
+          className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
+        >
+          ☎ {p}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 /** A labelled form field wrapper. */
 function Field({
   label,
@@ -685,27 +734,8 @@ function JobCard({
       <p className="mt-0.5 text-sm text-zinc-400">{job.company}</p>
 
       {hasContacts && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-          {contacts.emails.map((e) => (
-            <a
-              key={e}
-              href={`mailto:${e}`}
-              title={`Email ${e}`}
-              className="max-w-full truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
-            >
-              ✉ {e}
-            </a>
-          ))}
-          {contacts.phones.map((p) => (
-            <a
-              key={p}
-              href={`tel:${p.replace(/\s+/g, "")}`}
-              title={`Call ${p}`}
-              className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
-            >
-              ☎ {p}
-            </a>
-          ))}
+        <div className="mt-2">
+          <ContactChips emails={contacts.emails} phones={contacts.phones} />
         </div>
       )}
 

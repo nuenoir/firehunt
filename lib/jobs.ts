@@ -109,6 +109,31 @@ export function needsAttention(status: DueStatus): boolean {
   return status === "overdue" || status === "today" || status === "soon";
 }
 
+export interface JobStats {
+  total: number;
+  byStatus: Record<JobStatus, number>;
+  appliedOrBeyond: number; // jobs you actually applied to (applied → rejected)
+  responses: number; // interviews + offers
+  responseRate: number; // responses / appliedOrBeyond, 0..1 (0 when none applied)
+}
+
+/** Summarise a job list for the dashboard. Pure — no side effects. */
+export function jobStats(jobs: Job[]): JobStats {
+  const byStatus: Record<JobStatus, number> = {
+    interested: 0,
+    applied: 0,
+    interview: 0,
+    offer: 0,
+    rejected: 0,
+  };
+  for (const j of jobs) byStatus[j.status] += 1;
+  const appliedOrBeyond =
+    byStatus.applied + byStatus.interview + byStatus.offer + byStatus.rejected;
+  const responses = byStatus.interview + byStatus.offer;
+  const responseRate = appliedOrBeyond > 0 ? responses / appliedOrBeyond : 0;
+  return { total: jobs.length, byStatus, appliedOrBeyond, responses, responseRate };
+}
+
 /** Return only the jobs that match the given filters. Pure — no side effects. */
 export function filterJobs(jobs: Job[], filters: JobFilters): Job[] {
   const q = filters.query.trim().toLowerCase();

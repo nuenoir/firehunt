@@ -631,23 +631,98 @@ function cleanCapturedNotes(s: string): string {
     .trim();
 }
 
-/** Pull email + phone contacts out of a job's notes so they can be shown up front. */
-function extractContacts(text: string): { emails: string[]; phones: string[] } {
+/** A contact (email or phone) plus a best-effort guess at whose it is. */
+type Contact = { value: string; name: string };
+
+/** Capitalised words that can follow a trigger but aren't people, to avoid false labels. */
+const NAME_STOP = new Set(
+  "center centre team staff group office division department board call email phone mobile product owner manager senior junior lead role job apply now today please about we you your our us me the this that here there remote onsite hybrid monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december".split(
+    " ",
+  ),
+);
+function looksLikeName(s: string): boolean {
+  return !!s && !NAME_STOP.has(s.split(/\s+/)[0].toLowerCase());
+}
+
+/** Best-effort: find a person's name mentioned right next to a contact in the text.
+ *  Requires a trigger word ("contact/call/reach out to…") immediately followed by a
+ *  Capitalised name — case-sensitive on the name so we don't grab "us"/"today". */
+function nameNear(text: string, value: string): string {
+  const idx = text.indexOf(value);
+  if (idx < 0) return "";
+  const before = text.slice(Math.max(0, idx - 90), idx);
+  const after = text.slice(idx + value.length, idx + value.length + 60);
+  const re =
+    /(?:[Cc]ontact|[Cc]all|[Rr]each(?:\s+out)?(?:\s+to)?|[Ss]peak\s+(?:to|with)|[Aa]sk\s+for|[Aa]ttention|[Aa]ttn|[Rr]egards|[Ss]incerely|[Ee]mail|[Mm]essage)[\s:,]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})/g;
+  let m: RegExpExecArray | null;
+  let last = "";
+  while ((m = re.exec(before)) !== null) if (looksLikeName(m[1])) last = m[1];
+  if (last) return last.trim();
+  re.lastIndex = 0;
+  while ((m = re.exec(after)) !== null)
+    if (looksLikeName(m[1])) return m[1].trim();
+  return "";
+}
+
+/** Derive a name from an email local part (rob → Rob), skipping role addresses. */
+function nameFromEmail(email: string): string {
+  const local = email.split("@")[0] || "";
+  if (
+    /^(careers?|jobs?|hr|info|admin|hello|contact|recruit(?:ing|ment)?|talent|apply|applications?|team|support|office|no-?reply|enquir(?:y|ies)|sales|marketing)$/i.test(
+      local,
+    )
+  )
+    return "";
+  const parts = local.split(/[._-]+/).filter((p) => /^[A-Za-z]{2,15}$/.test(p));
+  if (parts.length === 0 || parts.length > 3) return "";
+  return parts
+    .map((p) => p[0].toUpperCase() + p.slice(1).toLowerCase())
+    .join(" ");
+}
+
+/** Pull email + phone contacts out of a job's notes, each with a best-effort name. */
+function extractContacts(text: string): { emails: Contact[]; phones: Contact[] } {
   if (!text) return { emails: [], phones: [] };
-  const uniq = (a: string[]) =>
-    Array.from(new Set(a.map((s) => s.trim()).filter(Boolean)));
-  const emails = text.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g) || [];
-  const phones = (
+  const uniqBy = (arr: Contact[]) => {
+    const seen = new Set<string>();
+    return arr.filter((c) =>
+      seen.has(c.value) ? false : (seen.add(c.value), true),
+    );
+  };
+  const emailStrs =
+    text.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g) || [];
+  const phoneStrs = (
     text.match(/(\+\d[\d ().\-]{6,}\d)|(\b0\d[\d ().\-]{7,}\d)/g) || []
   ).filter((p) => {
     const g = p.replace(/\D/g, "");
     return g.length >= 8 && g.length <= 15;
   });
-  return { emails: uniq(emails), phones: uniq(phones) };
+  const emails = uniqBy(
+    emailStrs.map((e) => {
+      const v = e.trim();
+      return { value: v, name: nameNear(text, v) || nameFromEmail(v) };
+    }),
+  );
+  const phones = uniqBy(
+    phoneStrs.map((p) => {
+      const v = p.trim();
+      return { value: v, name: nameNear(text, v) };
+    }),
+  );
+  return { emails, phones };
 }
 
-/** A single contact pill you can click to copy (text stays selectable too). */
-function ContactChip({ icon, value }: { icon: string; value: string }) {
+/** A single contact pill you can click to copy (text stays selectable too).
+ *  Shows a best-effort person name in front of the value when one was found. */
+function ContactChip({
+  icon,
+  value,
+  name,
+}: {
+  icon: string;
+  value: string;
+  name?: string;
+}) {
   const [copied, setCopied] = useState(false);
   async function copy() {
     try {
@@ -662,10 +737,17 @@ function ContactChip({ icon, value }: { icon: string; value: string }) {
     <button
       type="button"
       onClick={copy}
-      title={`Click to copy ${value}`}
+      title={name ? `Click to copy ${value} (${name})` : `Click to copy ${value}`}
       className="max-w-full cursor-copy select-text truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
     >
-      {copied ? "Copied ✓" : `${icon} ${value}`}
+      {copied ? (
+        "Copied ✓"
+      ) : (
+        <>
+          {icon} {name && <span className="font-semibold">{name} · </span>}
+          {value}
+        </>
+      )}
     </button>
   );
 }
@@ -675,16 +757,16 @@ function ContactChips({
   emails,
   phones,
 }: {
-  emails: string[];
-  phones: string[];
+  emails: Contact[];
+  phones: Contact[];
 }) {
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
       {emails.map((e) => (
-        <ContactChip key={e} icon="✉" value={e} />
+        <ContactChip key={e.value} icon="✉" value={e.value} name={e.name} />
       ))}
       {phones.map((p) => (
-        <ContactChip key={p} icon="☎" value={p} />
+        <ContactChip key={p.value} icon="☎" value={p.value} name={p.name} />
       ))}
     </div>
   );

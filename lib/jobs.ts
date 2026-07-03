@@ -24,6 +24,8 @@ export interface Job {
   notes: string; // optional ("" if none)
   dateAdded: string; // ISO date string, e.g. "2026-07-02T..."
   cvId?: string; // id of the CV attached to this application (optional)
+  deadline?: string; // application deadline, "YYYY-MM-DD" (optional)
+  followUpDate?: string; // next planned follow-up, "YYYY-MM-DD" (optional)
 }
 
 export interface StatusMeta {
@@ -82,6 +84,29 @@ export const COUNTRIES: string[] = [
 export interface JobFilters {
   country: string; // "" means "all countries"
   query: string; // matches job title or company, case-insensitive
+}
+
+/** How urgent a "YYYY-MM-DD" date is relative to today (also "YYYY-MM-DD").
+ *  Returns "" when there is no date. Pure so it's easy to test. */
+export type DueStatus = "overdue" | "today" | "soon" | "later" | "";
+export function dueStatus(
+  dateIso: string | undefined,
+  todayIso: string,
+): DueStatus {
+  if (!dateIso || !todayIso) return "";
+  if (dateIso < todayIso) return "overdue";
+  if (dateIso === todayIso) return "today";
+  const days = Math.round(
+    (new Date(`${dateIso}T00:00:00`).getTime() -
+      new Date(`${todayIso}T00:00:00`).getTime()) /
+      86_400_000,
+  );
+  return days <= 3 ? "soon" : "later";
+}
+
+/** True when a follow-up/deadline needs attention now (overdue, today, or soon). */
+export function needsAttention(status: DueStatus): boolean {
+  return status === "overdue" || status === "today" || status === "soon";
 }
 
 /** Return only the jobs that match the given filters. Pure — no side effects. */

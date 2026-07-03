@@ -8,7 +8,10 @@ import {
   COUNTRIES,
   JOBS_STORAGE_KEY,
   STATUSES,
+  dueStatus,
+  needsAttention,
   filterJobs,
+  type DueStatus,
   type Job,
   type JobStatus,
 } from "@/lib/jobs";
@@ -40,6 +43,8 @@ const EMPTY_FORM = {
   salary: "",
   status: "interested" as JobStatus,
   notes: "",
+  deadline: "",
+  followUpDate: "",
 };
 
 // Shared styling for text inputs / selects so they all look the same.
@@ -51,6 +56,7 @@ export default function Home() {
   const [cvList, setCvList] = useState<CvMeta[]>([]); // CVs available to attach
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loaded, setLoaded] = useState(false); // has the initial load finished?
+  const [todayIso, setTodayIso] = useState(""); // today as YYYY-MM-DD (set on the client)
 
   // Filters
   const [country, setCountry] = useState("");
@@ -81,6 +87,12 @@ export default function Home() {
       // ignore missing or corrupt data
     }
     setLoaded(true);
+  }, []);
+
+  // Today's date (client-only, so server/client render match), used to flag
+  // deadlines and follow-ups that are due soon or overdue.
+  useEffect(() => {
+    setTodayIso(new Date().toISOString().slice(0, 10));
   }, []);
 
   // Save whenever the jobs change — but not before the first load has run,
@@ -129,6 +141,17 @@ export default function Home() {
   // Contacts detected in the add-job form's notes, shown up front while editing.
   const formContacts = extractContacts(form.notes);
 
+  // How many still-active jobs have a follow-up or deadline that needs attention.
+  const dueCount = useMemo(() => {
+    if (!todayIso) return 0;
+    return jobs.filter(
+      (j) =>
+        j.status !== "rejected" &&
+        (needsAttention(dueStatus(j.followUpDate, todayIso)) ||
+          needsAttention(dueStatus(j.deadline, todayIso))),
+    ).length;
+  }, [jobs, todayIso]);
+
   function setField<K extends keyof typeof form>(
     key: K,
     value: (typeof form)[K],
@@ -149,6 +172,8 @@ export default function Home() {
       status: form.status,
       notes: form.notes.trim(),
       dateAdded: new Date().toISOString(),
+      deadline: form.deadline || undefined,
+      followUpDate: form.followUpDate || undefined,
     };
     setJobs((prev) => [job, ...prev]);
     setForm(EMPTY_FORM);
@@ -379,6 +404,22 @@ export default function Home() {
               placeholder="e.g. AED 30,000/mo"
             />
           </Field>
+          <Field label="Deadline (optional)">
+            <input
+              className={inputClass}
+              type="date"
+              value={form.deadline}
+              onChange={(e) => setField("deadline", e.target.value)}
+            />
+          </Field>
+          <Field label="Next follow-up (optional)">
+            <input
+              className={inputClass}
+              type="date"
+              value={form.followUpDate}
+              onChange={(e) => setField("followUpDate", e.target.value)}
+            />
+          </Field>
           {(formContacts.emails.length > 0 ||
             formContacts.phones.length > 0) && (
             <div className="flex flex-col gap-1.5 sm:col-span-2">
@@ -553,6 +594,14 @@ export default function Home() {
         </section>
       )}
 
+      {dueCount > 0 && (
+        <div className="mt-6 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-2.5 text-sm text-amber-200">
+          🔔 {dueCount} job{dueCount === 1 ? "" : "s"} need
+          {dueCount === 1 ? "s" : ""} attention — a follow-up or deadline is due
+          soon or overdue.
+        </div>
+      )}
+
       {/* Filters */}
       <div className="mt-6 flex flex-wrap items-center gap-3">
         <input
@@ -599,6 +648,7 @@ export default function Home() {
                       key={job.id}
                       job={job}
                       cvs={cvList}
+                      todayIso={todayIso}
                       onMove={moveJob}
                       onDelete={deleteJob}
                       onAttach={attachCv}
@@ -772,6 +822,37 @@ function ContactChips({
   );
 }
 
+/** A date pill that turns red when overdue and amber when due today/soon. */
+function DateBadge({
+  label,
+  dateIso,
+  todayIso,
+}: {
+  label: string;
+  dateIso: string;
+  todayIso: string;
+}) {
+  const status: DueStatus = dueStatus(dateIso, todayIso);
+  const color =
+    status === "overdue"
+      ? "text-red-300 border-red-400/40 bg-red-400/10"
+      : status === "today" || status === "soon"
+        ? "text-amber-300 border-amber-400/40 bg-amber-400/10"
+        : "text-zinc-300 border-white/10 bg-black/30";
+  const when = new Date(`${dateIso}T00:00:00`).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+  });
+  const suffix =
+    status === "overdue" ? " · overdue" : status === "today" ? " · today" : "";
+  return (
+    <span className={`rounded-full border px-2 py-0.5 ${color}`}>
+      {label}: {when}
+      {suffix}
+    </span>
+  );
+}
+
 /** A labelled form field wrapper. */
 function Field({
   label,
@@ -792,12 +873,14 @@ function Field({
 function JobCard({
   job,
   cvs,
+  todayIso,
   onMove,
   onDelete,
   onAttach,
 }: {
   job: Job;
   cvs: CvMeta[];
+  todayIso: string;
   onMove: (id: string, status: JobStatus) => void;
   onDelete: (id: string) => void;
   onAttach: (jobId: string, cvId: string) => void;
@@ -841,6 +924,25 @@ function JobCard({
           </span>
         )}
       </div>
+
+      {(job.deadline || job.followUpDate) && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+          {job.deadline && (
+            <DateBadge
+              label="⏳ Deadline"
+              dateIso={job.deadline}
+              todayIso={todayIso}
+            />
+          )}
+          {job.followUpDate && (
+            <DateBadge
+              label="🔔 Follow-up"
+              dateIso={job.followUpDate}
+              todayIso={todayIso}
+            />
+          )}
+        </div>
+      )}
 
       {job.notes && (
         <p className="mt-2 line-clamp-3 text-xs text-zinc-500">{job.notes}</p>

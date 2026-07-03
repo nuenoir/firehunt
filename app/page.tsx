@@ -646,7 +646,31 @@ function extractContacts(text: string): { emails: string[]; phones: string[] } {
   return { emails: uniq(emails), phones: uniq(phones) };
 }
 
-/** Clickable email / phone chips, shared by the add-job form and job cards. */
+/** A single contact pill you can click to copy (text stays selectable too). */
+function ContactChip({ icon, value }: { icon: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard may be blocked; the text is still selectable to copy by hand
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={copy}
+      title={`Click to copy ${value}`}
+      className="max-w-full cursor-copy select-text truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
+    >
+      {copied ? "Copied ✓" : `${icon} ${value}`}
+    </button>
+  );
+}
+
+/** Click-to-copy email / phone chips, shared by the add-job form and job cards. */
 function ContactChips({
   emails,
   phones,
@@ -657,24 +681,10 @@ function ContactChips({
   return (
     <div className="flex flex-wrap items-center gap-1.5 text-xs">
       {emails.map((e) => (
-        <a
-          key={e}
-          href={`mailto:${e}`}
-          title={`Email ${e}`}
-          className="max-w-full truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
-        >
-          ✉ {e}
-        </a>
+        <ContactChip key={e} icon="✉" value={e} />
       ))}
       {phones.map((p) => (
-        <a
-          key={p}
-          href={`tel:${p.replace(/\s+/g, "")}`}
-          title={`Call ${p}`}
-          className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
-        >
-          ☎ {p}
-        </a>
+        <ContactChip key={p} icon="☎" value={p} />
       ))}
     </div>
   );

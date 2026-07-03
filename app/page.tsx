@@ -3,7 +3,7 @@
 // This is a Client Component ("use client" above) because it uses state,
 // button clicks, and the browser's localStorage to remember your jobs.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   COUNTRIES,
   JOBS_STORAGE_KEY,
@@ -18,6 +18,12 @@ import {
 } from "@/lib/jobs";
 import { ADZUNA_COUNTRIES, type AdzunaJob } from "@/lib/adzuna";
 import { GULF_LOCATIONS } from "@/lib/jooble";
+import { supabase, syncEnabled } from "@/lib/supabase";
+import {
+  fetchRemoteJobs,
+  upsertRemoteJobs,
+  deleteRemoteJobs,
+} from "@/lib/jobsRemote";
 import CvManager from "@/app/CvManager";
 import InsightsManager from "@/app/InsightsManager";
 import PrepPrompt from "@/app/PrepPrompt";
@@ -59,6 +65,18 @@ export default function Home() {
   const [loaded, setLoaded] = useState(false); // has the initial load finished?
   const [todayIso, setTodayIso] = useState(""); // today as YYYY-MM-DD (set on the client)
 
+  // --- Cloud sync (Supabase) ---
+  const [user, setUser] = useState<{ id: string; email: string } | null>(null);
+  const [cloudReady, setCloudReady] = useState(false); // initial pull+merge done
+  const [syncStatus, setSyncStatus] = useState<
+    "idle" | "syncing" | "synced" | "error"
+  >("idle");
+  const [email, setEmail] = useState(""); // sign-in email field
+  const [authMsg, setAuthMsg] = useState(""); // feedback under the sign-in form
+  const jobsRef = useRef<Job[]>([]); // always-current jobs, for use inside effects
+  jobsRef.current = jobs;
+  const lastSyncedRef = useRef<Map<string, string>>(new Map()); // id -> JSON last pushed
+
   // Filters
   const [country, setCountry] = useState("");
   const [query, setQuery] = useState("");
@@ -95,6 +113,106 @@ export default function Home() {
   useEffect(() => {
     setTodayIso(new Date().toISOString().slice(0, 10));
   }, []);
+
+  // Watch auth state: restore an existing session and react to sign-in/out.
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => {
+      const u = data.session?.user;
+      if (u) setUser({ id: u.id, email: u.email ?? "" });
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      const u = session?.user;
+      if (u) {
+        setUser({ id: u.id, email: u.email ?? "" });
+      } else {
+        setUser(null);
+        setCloudReady(false);
+        lastSyncedRef.current = new Map();
+        setSyncStatus("idle");
+      }
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // On sign-in: pull the user's jobs from the cloud, merge in any local-only
+  // jobs (a one-time migration), then switch the board to the merged set.
+  useEffect(() => {
+    if (!supabase || !user || !loaded) return;
+    let cancelled = false;
+    (async () => {
+      setSyncStatus("syncing");
+      try {
+        const remote = await fetchRemoteJobs();
+        if (cancelled) return;
+        const local = jobsRef.current;
+        const remoteIds = new Set(remote.map((r) => r.id));
+        const localOnly = local.filter((j) => !remoteIds.has(j.id));
+        if (localOnly.length) await upsertRemoteJobs(localOnly, user.id);
+        const merged = [...remote, ...localOnly].sort((a, b) =>
+          (b.dateAdded || "").localeCompare(a.dateAdded || ""),
+        );
+        lastSyncedRef.current = new Map(
+          merged.map((j) => [j.id, JSON.stringify(j)]),
+        );
+        setJobs(merged);
+        setCloudReady(true);
+        setSyncStatus("synced");
+      } catch {
+        if (!cancelled) setSyncStatus("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, loaded]);
+
+  // While signed in, push local changes to the cloud: upsert new/edited jobs and
+  // delete removed ones, diffed against what we last pushed.
+  useEffect(() => {
+    if (!supabase || !user || !cloudReady) return;
+    const prev = lastSyncedRef.current;
+    const currentIds = new Set(jobs.map((j) => j.id));
+    const toUpsert = jobs.filter((j) => prev.get(j.id) !== JSON.stringify(j));
+    const toDelete = [...prev.keys()].filter((id) => !currentIds.has(id));
+    if (toUpsert.length === 0 && toDelete.length === 0) return;
+    setSyncStatus("syncing");
+    (async () => {
+      try {
+        await upsertRemoteJobs(toUpsert, user.id);
+        await deleteRemoteJobs(toDelete);
+        lastSyncedRef.current = new Map(
+          jobs.map((j) => [j.id, JSON.stringify(j)]),
+        );
+        setSyncStatus("synced");
+      } catch {
+        setSyncStatus("error");
+      }
+    })();
+  }, [jobs, user, cloudReady]);
+
+  // Email a magic sign-in link (no password to manage).
+  async function sendMagicLink(e: React.FormEvent) {
+    e.preventDefault();
+    if (!supabase || !email.trim()) return;
+    setAuthMsg("Sending…");
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setAuthMsg(
+      error
+        ? `Couldn't send the link: ${error.message}`
+        : "Check your email for a sign-in link ✉ (it may take a minute).",
+    );
+  }
+
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setEmail("");
+    setAuthMsg("");
+  }
 
   // Save whenever the jobs change — but not before the first load has run,
   // otherwise we'd overwrite saved data with an empty list on startup.
@@ -305,6 +423,65 @@ export default function Home() {
           </button>
         </nav>
       </header>
+
+      {syncEnabled && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm">
+          {user ? (
+            <>
+              <span className="text-zinc-300">
+                ☁ Synced as{" "}
+                <strong className="text-zinc-100">{user.email}</strong>
+                <span className="ml-2 text-xs text-zinc-500">
+                  {syncStatus === "syncing"
+                    ? "· saving…"
+                    : syncStatus === "error"
+                      ? "· ⚠ sync error"
+                      : "· up to date"}
+                </span>
+              </span>
+              <button
+                onClick={signOut}
+                className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
+              >
+                Sign out
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="text-zinc-400">
+                🔒 Saved on this device only.{" "}
+                <span className="text-zinc-300">
+                  Sign in to sync across devices:
+                </span>
+              </span>
+              <form
+                onSubmit={sendMagicLink}
+                className="flex flex-wrap items-center gap-2"
+              >
+                <input
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@email.com"
+                  className={`${inputClass} py-1.5`}
+                />
+                <button
+                  type="submit"
+                  className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-black transition hover:opacity-90"
+                >
+                  Email me a link
+                </button>
+                {authMsg && (
+                  <span className="w-full text-xs text-zinc-400 sm:w-auto">
+                    {authMsg}
+                  </span>
+                )}
+              </form>
+            </>
+          )}
+        </div>
+      )}
 
       {view === "cvs" && <CvManager />}
 

@@ -3,6 +3,8 @@
 // this one function so switching providers later (e.g. Twilio) is a contained
 // change — callers just call sendWhatsApp(text).
 
+import { STATUSES } from "./jobs";
+
 export async function sendWhatsApp(
   text: string,
 ): Promise<{ ok: boolean; detail: string }> {
@@ -50,4 +52,33 @@ export function buildDigest(input: {
     "",
     "Open your board: https://firehunt.vercel.app",
   ].join("\n");
+}
+
+export interface JobSummaryRow {
+  status: string;
+  deadline: string | null;
+  follow_up_date: string | null;
+}
+
+/** Count the jobs and produce the digest text — shared by the cron job and the
+ *  "send now" button so they always say the same thing. */
+export function summarizeJobs(rows: JobSummaryRow[]): {
+  text: string;
+  summary: { total: number; followUps: number; deadlines: number };
+} {
+  const total = rows.length;
+  const today = new Date().toISOString().slice(0, 10);
+  const in7 = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  const active = rows.filter((r) => r.status !== "rejected");
+  const followUps = active.filter(
+    (r) => r.follow_up_date && r.follow_up_date <= today,
+  ).length;
+  const deadlines = active.filter(
+    (r) => r.deadline && r.deadline >= today && r.deadline <= in7,
+  ).length;
+  const byStage = STATUSES.map((s) => ({
+    label: s.label,
+    n: rows.filter((r) => r.status === s.id).length,
+  }));
+  return { text: buildDigest({ total, byStage, followUps, deadlines }), summary: { total, followUps, deadlines } };
 }

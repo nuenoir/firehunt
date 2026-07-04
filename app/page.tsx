@@ -77,6 +77,8 @@ export default function Home() {
   >("idle");
   const [email, setEmail] = useState(""); // sign-in email field
   const [authMsg, setAuthMsg] = useState(""); // feedback under the sign-in form
+  const [notifying, setNotifying] = useState(false); // WhatsApp summary in flight
+  const [notifyMsg, setNotifyMsg] = useState(""); // WhatsApp send feedback
   const jobsRef = useRef<Job[]>([]); // always-current jobs, for use inside effects
   jobsRef.current = jobs;
   const lastSyncedRef = useRef<Map<string, string>>(new Map()); // id -> JSON last pushed
@@ -222,6 +224,36 @@ export default function Home() {
     await supabase.auth.signOut();
     setEmail("");
     setAuthMsg("");
+  }
+
+  // Send a job-summary WhatsApp on demand (uses your login token so only you
+  // can trigger your own message).
+  async function sendWhatsAppSummary() {
+    if (!supabase) return;
+    setNotifying(true);
+    setNotifyMsg("");
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) {
+        setNotifyMsg("Please sign in again.");
+        return;
+      }
+      const res = await fetch("/api/notify", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const body = await res.json();
+      setNotifyMsg(
+        res.ok && body.sent
+          ? "Sent to your WhatsApp ✓"
+          : `Couldn't send: ${body.detail || body.error || "unknown error"}`,
+      );
+    } catch {
+      setNotifyMsg("Couldn't send the summary.");
+    } finally {
+      setNotifying(false);
+    }
   }
 
   // Save whenever the jobs change — but not before the first load has run,
@@ -516,12 +548,25 @@ export default function Home() {
                       : "· up to date"}
                 </span>
               </span>
-              <button
-                onClick={signOut}
-                className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
-              >
-                Sign out
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                {notifyMsg && (
+                  <span className="text-xs text-zinc-400">{notifyMsg}</span>
+                )}
+                <button
+                  onClick={sendWhatsAppSummary}
+                  disabled={notifying}
+                  title="Send a job summary to your WhatsApp"
+                  className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-50"
+                >
+                  {notifying ? "Sending…" : "📲 WhatsApp me a summary"}
+                </button>
+                <button
+                  onClick={signOut}
+                  className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
+                >
+                  Sign out
+                </button>
+              </div>
             </>
           ) : (
             <>

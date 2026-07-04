@@ -6,14 +6,7 @@
 // every job in the account (fine for a personal deployment).
 
 import { createClient } from "@supabase/supabase-js";
-import { STATUSES } from "@/lib/jobs";
-import { buildDigest, sendWhatsApp } from "@/lib/notify";
-
-interface JobRow {
-  status: string;
-  deadline: string | null;
-  follow_up_date: string | null;
-}
+import { sendWhatsApp, summarizeJobs, type JobSummaryRow } from "@/lib/notify";
 
 export async function GET(request: Request) {
   // Only Vercel Cron (or someone with the secret) may trigger this.
@@ -41,28 +34,8 @@ export async function GET(request: Request) {
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  const rows = (data ?? []) as JobRow[];
-  const total = rows.length;
-  const today = new Date().toISOString().slice(0, 10);
-  const in7 = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
-  const active = rows.filter((r) => r.status !== "rejected");
-  const followUps = active.filter(
-    (r) => r.follow_up_date && r.follow_up_date <= today,
-  ).length;
-  const deadlines = active.filter(
-    (r) => r.deadline && r.deadline >= today && r.deadline <= in7,
-  ).length;
-  const byStage = STATUSES.map((s) => ({
-    label: s.label,
-    n: rows.filter((r) => r.status === s.id).length,
-  }));
-
-  const text = buildDigest({ total, byStage, followUps, deadlines });
+  const { text, summary } = summarizeJobs((data ?? []) as JobSummaryRow[]);
   const result = await sendWhatsApp(text);
 
-  return Response.json({
-    sent: result.ok,
-    detail: result.detail,
-    summary: { total, followUps, deadlines },
-  });
+  return Response.json({ sent: result.ok, detail: result.detail, summary });
 }

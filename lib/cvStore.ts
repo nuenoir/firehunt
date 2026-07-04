@@ -52,6 +52,23 @@ export async function saveCv(record: CvRecord): Promise<void> {
   });
 }
 
+// Fetch one CV record (with its file blob) by id, or undefined if not stored here.
+export async function getCv(id: string): Promise<CvRecord | undefined> {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).get(id);
+    req.onsuccess = () => {
+      db.close();
+      resolve(req.result as CvRecord | undefined);
+    };
+    req.onerror = () => {
+      db.close();
+      reject(req.error);
+    };
+  });
+}
+
 export async function getAllCvs(): Promise<CvRecord[]> {
   const db = await openDb();
   return new Promise((resolve, reject) => {

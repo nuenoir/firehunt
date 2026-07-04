@@ -1,7 +1,9 @@
 "use client";
 
-// The "CVs" tab: upload PDF/Word CVs, tag them by role, download or delete
-// them. Files live in IndexedDB (see lib/cvStore.ts) — private to this browser.
+// The "CVs" tab: upload PDF/Word CVs, tag them by role, download or delete them.
+// Files live in this browser's IndexedDB (see lib/cvStore.ts). When you're
+// signed in, they ALSO sync to Supabase Storage so they appear on every device;
+// files you didn't upload here are downloaded on demand when you open them.
 
 import { useEffect, useState } from "react";
 import {
@@ -12,24 +14,142 @@ import {
   roleLabel,
   type CvRole,
 } from "@/lib/cvs";
-import { deleteCv, getAllCvs, saveCv, type CvRecord } from "@/lib/cvStore";
+import {
+  deleteCv,
+  getAllCvs,
+  getCv,
+  saveCv,
+  type CvRecord,
+} from "@/lib/cvStore";
+import { supabase } from "@/lib/supabase";
+import {
+  cvStoragePath,
+  deleteRemoteCv,
+  downloadRemoteCv,
+  fetchRemoteCvs,
+  updateRemoteCvRole,
+  uploadRemoteCv,
+} from "@/lib/cvsRemote";
+
+// A CV as shown in the list. It may live locally (has the file here), in the
+// cloud (path set), or both.
+interface CvItem {
+  id: string;
+  name: string;
+  role: CvRole;
+  type: string;
+  size: number;
+  dateAdded: string;
+  path?: string; // cloud storage path, when synced
+  hasLocalBlob: boolean; // whether the file is in THIS browser
+}
 
 export default function CvManager() {
-  const [cvs, setCvs] = useState<CvRecord[]>([]);
+  const [items, setItems] = useState<CvItem[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [role, setRole] = useState<CvRole>("consulting"); // role for the next upload
   const [error, setError] = useState("");
+  const [user, setUser] = useState<{ id: string } | null>(null);
+  const [busyId, setBusyId] = useState(""); // a CV currently downloading
 
-  // Load saved CVs from the browser database once, on open.
+  // Track auth state so we know whether to sync. Only update when the user id
+  // actually changes, so the load-and-migrate effect below doesn't re-run on
+  // every auth event.
   useEffect(() => {
-    getAllCvs()
-      .then((list) => {
-        list.sort((a, b) => b.dateAdded.localeCompare(a.dateAdded)); // newest first
-        setCvs(list);
-      })
-      .catch(() => setError("Could not open the CV store in this browser."))
-      .finally(() => setLoaded(true));
+    if (!supabase) return;
+    const apply = (id: string | undefined) =>
+      setUser((prev) => (prev?.id === id ? prev : id ? { id } : null));
+    supabase.auth.getUser().then(({ data }) => apply(data.user?.id));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) =>
+      apply(session?.user?.id),
+    );
+    return () => sub.subscription.unsubscribe();
   }, []);
+
+  // Load CVs: local ones always; when signed in, merge the cloud list and
+  // migrate any local-only CVs up (a one-time upload).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoaded(false);
+      try {
+        const local = await getAllCvs();
+        const localById = new Map(local.map((c) => [c.id, c]));
+
+        if (supabase && user) {
+          const remote = await fetchRemoteCvs();
+          const remoteById = new Map(remote.map((r) => [r.id, r]));
+          const localOnly = local.filter((c) => !remoteById.has(c.id));
+          // Migrate local-only CVs to the cloud.
+          for (const c of localOnly) {
+            try {
+              await uploadRemoteCv({
+                userId: user.id,
+                id: c.id,
+                name: c.name,
+                role: c.role,
+                type: c.type,
+                size: c.size,
+                dateAdded: c.dateAdded,
+                blob: c.blob,
+              });
+            } catch {
+              /* keep going; it stays available locally */
+            }
+          }
+          const map = new Map<string, CvItem>();
+          for (const r of remote) {
+            map.set(r.id, {
+              id: r.id,
+              name: r.name,
+              role: r.role,
+              type: r.type,
+              size: r.size,
+              dateAdded: r.dateAdded,
+              path: r.path,
+              hasLocalBlob: localById.has(r.id),
+            });
+          }
+          for (const c of localOnly) {
+            map.set(c.id, {
+              id: c.id,
+              name: c.name,
+              role: c.role,
+              type: c.type,
+              size: c.size,
+              dateAdded: c.dateAdded,
+              path: cvStoragePath(user.id, c.id),
+              hasLocalBlob: true,
+            });
+          }
+          const union = [...map.values()].sort((a, b) =>
+            b.dateAdded.localeCompare(a.dateAdded),
+          );
+          if (!cancelled) setItems(union);
+        } else {
+          const localItems: CvItem[] = local
+            .map((c) => ({
+              id: c.id,
+              name: c.name,
+              role: c.role,
+              type: c.type,
+              size: c.size,
+              dateAdded: c.dateAdded,
+              hasLocalBlob: true,
+            }))
+            .sort((a, b) => b.dateAdded.localeCompare(a.dateAdded));
+          if (!cancelled) setItems(localItems);
+        }
+      } catch {
+        if (!cancelled) setError("Could not load your CVs.");
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     setError("");
@@ -54,43 +174,116 @@ export default function CvManager() {
       blob: file,
     };
     try {
-      await saveCv(record);
-      setCvs((prev) => [record, ...prev]);
+      await saveCv(record); // always keep a local copy
+      let path: string | undefined;
+      if (supabase && user) {
+        path = await uploadRemoteCv({
+          userId: user.id,
+          id: record.id,
+          name: record.name,
+          role: record.role,
+          type: record.type,
+          size: record.size,
+          dateAdded: record.dateAdded,
+          blob: file,
+        });
+      }
+      const item: CvItem = {
+        id: record.id,
+        name: record.name,
+        role: record.role,
+        type: record.type,
+        size: record.size,
+        dateAdded: record.dateAdded,
+        path,
+        hasLocalBlob: true,
+      };
+      setItems((prev) => [item, ...prev]);
     } catch {
-      setError("Could not save the file. Your browser storage may be full.");
+      setError(
+        "Could not save the file. Your browser storage may be full, or the upload failed.",
+      );
     }
   }
 
-  async function changeRole(cv: CvRecord, newRole: CvRole) {
-    const updated = { ...cv, role: newRole };
+  async function changeRole(item: CvItem, newRole: CvRole) {
     try {
-      await saveCv(updated);
-      setCvs((prev) => prev.map((c) => (c.id === cv.id ? updated : c)));
+      if (item.hasLocalBlob) {
+        const rec = await getCv(item.id);
+        if (rec) await saveCv({ ...rec, role: newRole });
+      }
+      if (supabase && user && item.path) {
+        await updateRemoteCvRole(item.id, newRole);
+      }
+      setItems((prev) =>
+        prev.map((c) => (c.id === item.id ? { ...c, role: newRole } : c)),
+      );
     } catch {
       setError("Could not update the CV.");
     }
   }
 
-  async function remove(cv: CvRecord) {
+  async function remove(item: CvItem) {
     try {
-      await deleteCv(cv.id);
-      setCvs((prev) => prev.filter((c) => c.id !== cv.id));
+      if (item.hasLocalBlob) await deleteCv(item.id);
+      if (supabase && user && item.path) await deleteRemoteCv(item.id, item.path);
+      setItems((prev) => prev.filter((c) => c.id !== item.id));
     } catch {
       setError("Could not delete the CV.");
     }
   }
 
-  // Save the stored file to the user's computer with its original name.
-  function download(cv: CvRecord) {
-    const url = URL.createObjectURL(cv.blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = cv.name;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+  // Save the file to the user's computer — from the local copy if we have it,
+  // otherwise downloaded from the cloud (and cached locally for next time).
+  async function download(item: CvItem) {
+    setError("");
+    setBusyId(item.id);
+    try {
+      let blob: Blob | undefined;
+      if (item.hasLocalBlob) {
+        blob = (await getCv(item.id))?.blob;
+      }
+      if (!blob && item.path && supabase) {
+        blob = await downloadRemoteCv(item.path);
+        try {
+          await saveCv({
+            id: item.id,
+            name: item.name,
+            role: item.role,
+            type: item.type,
+            size: item.size,
+            dateAdded: item.dateAdded,
+            blob,
+          });
+          setItems((prev) =>
+            prev.map((c) =>
+              c.id === item.id ? { ...c, hasLocalBlob: true } : c,
+            ),
+          );
+        } catch {
+          /* caching is best-effort */
+        }
+      }
+      if (!blob) {
+        setError("Could not find that file.");
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = item.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      setError("Could not download the CV.");
+    } finally {
+      setBusyId("");
+    }
   }
+
+  const syncing = Boolean(supabase && user);
 
   return (
     <div className="mt-6">
@@ -99,7 +292,10 @@ export default function CvManager() {
         <h2 className="text-lg font-semibold">Your CVs</h2>
         <p className="mt-1 text-sm text-zinc-400">
           Upload a PDF or Word CV and tag it by the kind of role it is written
-          for. Files are stored privately in this browser.
+          for.{" "}
+          {syncing
+            ? "You're signed in, so your CVs sync across your devices ☁"
+            : "Files are stored privately in this browser — sign in to sync them across devices."}
         </p>
         <div className="mt-4 flex flex-wrap items-end gap-3">
           <label className="flex flex-col gap-1.5 text-sm">
@@ -134,13 +330,13 @@ export default function CvManager() {
       </div>
 
       {/* CV list */}
-      {loaded && cvs.length === 0 ? (
+      {loaded && items.length === 0 ? (
         <p className="mt-6 rounded-2xl border border-dashed border-white/10 py-16 text-center text-sm text-zinc-500">
           No CVs yet. Upload your first one above.
         </p>
       ) : (
         <div className="mt-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {cvs.map((cv) => {
+          {items.map((cv) => {
             const meta = CV_ROLES.find((r) => r.id === cv.role);
             return (
               <article
@@ -169,6 +365,18 @@ export default function CvManager() {
                   <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-zinc-300">
                     {formatBytes(cv.size)}
                   </span>
+                  {syncing && cv.path && (
+                    <span
+                      className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-zinc-400"
+                      title={
+                        cv.hasLocalBlob
+                          ? "Synced and saved on this device"
+                          : "In the cloud — downloads when you open it"
+                      }
+                    >
+                      {cv.hasLocalBlob ? "☁ synced" : "☁ cloud"}
+                    </span>
+                  )}
                 </div>
                 <div className="mt-auto flex items-center justify-between gap-2 pt-4">
                   <select
@@ -184,9 +392,10 @@ export default function CvManager() {
                   </select>
                   <button
                     onClick={() => download(cv)}
-                    className="text-xs font-medium text-accent hover:underline"
+                    disabled={busyId === cv.id}
+                    className="text-xs font-medium text-accent hover:underline disabled:opacity-50"
                   >
-                    Download ↓
+                    {busyId === cv.id ? "Downloading…" : "Download ↓"}
                   </button>
                 </div>
                 <p className="mt-2 text-[11px] text-zinc-600">

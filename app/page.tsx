@@ -30,6 +30,7 @@ import PrepPrompt from "@/app/PrepPrompt";
 import Bookmarklet from "@/app/Bookmarklet";
 import DataBackup from "@/app/DataBackup";
 import { getAllCvs } from "@/lib/cvStore";
+import { fetchRemoteCvs } from "@/lib/cvsRemote";
 import { roleLabel, type CvRole } from "@/lib/cvs";
 
 type View = "jobs" | "cvs" | "insights";
@@ -234,12 +235,34 @@ export default function Home() {
   // uploaded in the CVs tab show up here too.
   useEffect(() => {
     if (view !== "jobs") return;
-    getAllCvs()
-      .then((list) =>
-        setCvList(list.map((c) => ({ id: c.id, name: c.name, role: c.role }))),
-      )
-      .catch(() => setCvList([]));
-  }, [view]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const map = new Map<string, CvMeta>();
+        const local = await getAllCvs();
+        for (const c of local)
+          map.set(c.id, { id: c.id, name: c.name, role: c.role });
+        // When signed in, also include CVs that live only in the cloud, so a job
+        // attached to one on another device still shows its name here.
+        if (supabase && user) {
+          try {
+            const remote = await fetchRemoteCvs();
+            for (const r of remote)
+              if (!map.has(r.id))
+                map.set(r.id, { id: r.id, name: r.name, role: r.role });
+          } catch {
+            /* ignore remote CV fetch errors */
+          }
+        }
+        if (!cancelled) setCvList([...map.values()]);
+      } catch {
+        if (!cancelled) setCvList([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [view, user]);
 
   // If opened via the bookmarklet (URL has ?fh_ params), pre-fill and open the
   // Add-a-job form, then clean the URL so a refresh doesn't re-add the job.

@@ -25,6 +25,7 @@ export async function GET(request: Request) {
   const what = searchParams.get("what")?.trim() || "";
   const where = searchParams.get("where")?.trim() || "";
   const page = searchParams.get("page") || "1";
+  const sort = searchParams.get("sort") || ""; // "date" surfaces newer, more varied roles
 
   // Build the Adzuna request URL with our secret credentials attached.
   const adzunaUrl = new URL(
@@ -32,10 +33,11 @@ export async function GET(request: Request) {
   );
   adzunaUrl.searchParams.set("app_id", appId);
   adzunaUrl.searchParams.set("app_key", appKey);
-  adzunaUrl.searchParams.set("results_per_page", "20");
+  adzunaUrl.searchParams.set("results_per_page", "30");
   adzunaUrl.searchParams.set("content-type", "application/json");
   if (what) adzunaUrl.searchParams.set("what", what);
   if (where) adzunaUrl.searchParams.set("where", where);
+  if (sort === "date") adzunaUrl.searchParams.set("sort_by", "date");
 
   try {
     const res = await fetch(adzunaUrl, { cache: "no-store" });

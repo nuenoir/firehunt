@@ -58,6 +58,9 @@ const EMPTY_FORM = {
 const inputClass =
   "rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-accent/70";
 
+// How many search results to show per page.
+const SEARCH_PAGE_SIZE = 30;
+
 export default function Home() {
   const [view, setView] = useState<View>("jobs"); // which tab is showing
   const [cvList, setCvList] = useState<CvMeta[]>([]); // CVs available to attach
@@ -94,8 +97,14 @@ export default function Home() {
   const [sWhere, setSWhere] = useState("");
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState("");
-  const [results, setResults] = useState<AdzunaJob[]>([]);
+  const [results, setResults] = useState<AdzunaJob[]>([]); // current page shown
   const [imported, setImported] = useState<Set<string>>(new Set());
+  // Pagination
+  const [sPage, setSPage] = useState(1);
+  const [sTotal, setSTotal] = useState(0); // total results (or pool size for All Gulf)
+  const [sPool, setSPool] = useState<AdzunaJob[]>([]); // whole merged list for All Gulf
+  const [sPooled, setSPooled] = useState(false); // true when paging a local pool
+  const [sSort, setSSort] = useState<"relevance" | "date">("relevance");
 
   // Load saved jobs once, when the page first opens (browser only).
   useEffect(() => {
@@ -320,8 +329,7 @@ export default function Home() {
     return { provider: sTarget.slice(0, sep), value: sTarget.slice(sep + 1) };
   }
 
-  async function runSearch(e: React.FormEvent) {
-    e.preventDefault();
+  async function doSearch(page: number) {
     setSearching(true);
     setSearchError("");
     try {
@@ -330,18 +338,46 @@ export default function Home() {
       if (provider === "jooble") {
         // Jooble's Gulf data only resolves by COUNTRY, not city — so keep the
         // country as the location and fold any typed city into the keywords.
-        const keywords = sWhere.trim() ? `${sWhat} ${sWhere.trim()}`.trim() : sWhat;
-        url = `/api/jooble?${new URLSearchParams({ what: keywords, location: value }).toString()}`;
+        const keywords = sWhere.trim()
+          ? `${sWhat} ${sWhere.trim()}`.trim()
+          : sWhat;
+        url = `/api/jooble?${new URLSearchParams({
+          what: keywords,
+          location: value,
+          page: String(page),
+        }).toString()}`;
       } else {
-        url = `/api/adzuna?${new URLSearchParams({ country: value, what: sWhat, where: sWhere }).toString()}`;
+        url = `/api/adzuna?${new URLSearchParams({
+          country: value,
+          what: sWhat,
+          where: sWhere,
+          page: String(page),
+          sort: sSort,
+        }).toString()}`;
       }
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok) {
         setSearchError(data.error || "Search failed. Please try again.");
         setResults([]);
+        setSTotal(0);
+        setSPool([]);
+        setSPooled(false);
+      } else if (data.pooled) {
+        // "All Gulf": one merged pool we page through locally.
+        const pool = data.results as AdzunaJob[];
+        setSPool(pool);
+        setSPooled(true);
+        setSTotal(pool.length);
+        setSPage(1);
+        setResults(pool.slice(0, SEARCH_PAGE_SIZE));
       } else {
+        // Single source: the server returns one page + a total count.
+        setSPooled(false);
+        setSPool([]);
         setResults(data.results as AdzunaJob[]);
+        setSTotal(data.count ?? 0);
+        setSPage(page);
       }
     } catch {
       setSearchError("Could not reach the search service.");
@@ -351,11 +387,29 @@ export default function Home() {
     }
   }
 
+  function onSearchSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    doSearch(1);
+  }
+
+  const searchTotalPages = Math.max(1, Math.ceil(sTotal / SEARCH_PAGE_SIZE));
+
+  function goToSearchPage(n: number) {
+    if (n < 1 || n > searchTotalPages || searching) return;
+    if (sPooled) {
+      setSPage(n);
+      setResults(sPool.slice((n - 1) * SEARCH_PAGE_SIZE, n * SEARCH_PAGE_SIZE));
+    } else {
+      doSearch(n);
+    }
+  }
+
   // Copy a search result into your own board as a new job.
   function currentTargetLabel(): string {
     const { provider, value } = searchProviderAndValue();
     if (provider === "jooble") {
-      return GULF_LOCATIONS.find((g) => g.location === value)?.label ?? value;
+      // "ALL_GULF" isn't a single country — imported results fall back to "Other".
+      return GULF_LOCATIONS.find((g) => g.location === value)?.label ?? "Other";
     }
     return ADZUNA_COUNTRIES.find((c) => c.code === value)?.label ?? value;
   }
@@ -646,7 +700,7 @@ export default function Home() {
       {showSearch && (
         <section className="mt-6 rounded-xl border border-white/10 bg-white/5 p-5">
           <form
-            onSubmit={runSearch}
+            onSubmit={onSearchSubmit}
             className="grid grid-cols-1 gap-4 sm:grid-cols-4"
           >
             <div className="sm:col-span-2">
@@ -666,6 +720,7 @@ export default function Home() {
                 onChange={(e) => setSTarget(e.target.value)}
               >
                 <optgroup label="Gulf (via Jooble)">
+                  <option value="jooble:ALL_GULF">🌍 All Gulf countries</option>
                   {GULF_LOCATIONS.map((g) => (
                     <option key={g.location} value={`jooble:${g.location}`}>
                       {g.label}
@@ -689,22 +744,38 @@ export default function Home() {
                 placeholder="e.g. Amsterdam"
               />
             </Field>
+            <Field label="Sort (Adzuna only)">
+              <select
+                className={inputClass}
+                value={sSort}
+                onChange={(e) =>
+                  setSSort(e.target.value as "relevance" | "date")
+                }
+              >
+                <option value="relevance">Relevance</option>
+                <option value="date">Newest first</option>
+              </select>
+            </Field>
             <div className="sm:col-span-4">
               <button
                 type="submit"
                 disabled={searching}
                 className="rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-black transition hover:opacity-90 disabled:opacity-50"
               >
-                {searching ? "Searching…" : "Search Adzuna"}
+                {searching ? "Searching…" : "🔎 Search jobs"}
               </button>
             </div>
           </form>
 
           <p className="mt-3 text-xs text-zinc-500">
-            Gulf countries (UAE, Saudi, Qatar…) search via Jooble; Australia,
-            Singapore and Europe via Adzuna. Gulf results are matched by country
-            (a typed city becomes an extra keyword). Jooble has limited free Gulf
-            data, so use the bookmarklet or Add a job for anything it misses.
+            Gulf countries search via Jooble — pick{" "}
+            <strong>🌍 All Gulf countries</strong> to search them all at once;
+            Australia, Singapore and Europe via Adzuna. Senior roles tend to
+            cluster on page 1, so browse further pages, try specific titles
+            (e.g. &ldquo;product manager&rdquo;), or set Sort to &ldquo;Newest
+            first&rdquo; on Adzuna to surface more mid-level roles. Jooble has
+            limited free Gulf data, so use the bookmarklet or Add a job for
+            anything it misses.
           </p>
 
           {searchError && (
@@ -713,6 +784,13 @@ export default function Home() {
             </p>
           )}
 
+          {results.length > 0 && (
+            <p className="mt-4 text-xs text-zinc-400">
+              {sTotal.toLocaleString()} result{sTotal === 1 ? "" : "s"}
+              {sPooled ? " across the Gulf" : ""} · page {sPage} of{" "}
+              {searchTotalPages}
+            </p>
+          )}
           {results.length > 0 && (
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {results.map((r) => {
@@ -767,6 +845,30 @@ export default function Home() {
                   </article>
                 );
               })}
+            </div>
+          )}
+
+          {results.length > 0 && searchTotalPages > 1 && (
+            <div className="mt-5 flex items-center justify-center gap-3">
+              <button
+                type="button"
+                onClick={() => goToSearchPage(sPage - 1)}
+                disabled={sPage <= 1 || searching}
+                className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
+              >
+                ← Prev
+              </button>
+              <span className="text-xs text-zinc-400">
+                Page {sPage} of {searchTotalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => goToSearchPage(sPage + 1)}
+                disabled={sPage >= searchTotalPages || searching}
+                className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
+              >
+                Next →
+              </button>
             </div>
           )}
         </section>

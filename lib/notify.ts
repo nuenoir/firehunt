@@ -34,7 +34,7 @@ export function buildDigest(input: {
   total: number;
   byStage: { label: string; n: number }[];
   followUps: number;
-  deadlines: number;
+  deadlines: { w1: number; w2: number; w3: number; w4: number };
 }): string {
   const stageLine =
     input.byStage
@@ -48,7 +48,12 @@ export function buildDigest(input: {
     `By stage: ${stageLine}`,
     "",
     `Follow-ups due today or overdue: ${input.followUps}`,
-    `Deadlines in the next 7 days: ${input.deadlines}`,
+    "",
+    "Deadlines coming up:",
+    `- Within 1 week: ${input.deadlines.w1}`,
+    `- In 2 weeks: ${input.deadlines.w2}`,
+    `- In 3 weeks: ${input.deadlines.w3}`,
+    `- In 4 weeks: ${input.deadlines.w4}`,
     "",
     "Open your board: https://firehunt.vercel.app",
   ].join("\n");
@@ -67,18 +72,38 @@ export function summarizeJobs(rows: JobSummaryRow[]): {
   summary: { total: number; followUps: number; deadlines: number };
 } {
   const total = rows.length;
-  const today = new Date().toISOString().slice(0, 10);
-  const in7 = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  const offset = (days: number) =>
+    new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+  const today = offset(0);
+  const w1 = offset(7);
+  const w2 = offset(14);
+  const w3 = offset(21);
+  const w4 = offset(28);
   const active = rows.filter((r) => r.status !== "rejected");
   const followUps = active.filter(
     (r) => r.follow_up_date && r.follow_up_date <= today,
   ).length;
-  const deadlines = active.filter(
-    (r) => r.deadline && r.deadline >= today && r.deadline <= in7,
-  ).length;
+  // Upcoming deadlines split into weekly windows.
+  const upcoming = active.filter(
+    (r): r is JobSummaryRow & { deadline: string } =>
+      !!r.deadline && r.deadline >= today,
+  );
+  const deadlines = {
+    w1: upcoming.filter((r) => r.deadline <= w1).length,
+    w2: upcoming.filter((r) => r.deadline > w1 && r.deadline <= w2).length,
+    w3: upcoming.filter((r) => r.deadline > w2 && r.deadline <= w3).length,
+    w4: upcoming.filter((r) => r.deadline > w3 && r.deadline <= w4).length,
+  };
   const byStage = STATUSES.map((s) => ({
     label: s.label,
     n: rows.filter((r) => r.status === s.id).length,
   }));
-  return { text: buildDigest({ total, byStage, followUps, deadlines }), summary: { total, followUps, deadlines } };
+  return {
+    text: buildDigest({ total, byStage, followUps, deadlines }),
+    summary: {
+      total,
+      followUps,
+      deadlines: deadlines.w1 + deadlines.w2 + deadlines.w3 + deadlines.w4,
+    },
+  };
 }

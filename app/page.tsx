@@ -377,6 +377,22 @@ export default function Home() {
     );
   }
 
+  // Set/clear a job's deadline and follow-up date (edited on the card). Empty
+  // string clears the date. Changes sync to the cloud via the jobs sync effect.
+  function setJobDates(id: string, deadline: string, followUpDate: string) {
+    setJobs((prev) =>
+      prev.map((j) =>
+        j.id === id
+          ? {
+              ...j,
+              deadline: deadline || undefined,
+              followUpDate: followUpDate || undefined,
+            }
+          : j,
+      ),
+    );
+  }
+
   // Ask our own /api/adzuna endpoint for real jobs, then show them.
   // Split "provider:value" into its two parts.
   function searchProviderAndValue() {
@@ -1002,6 +1018,7 @@ export default function Home() {
                       onMove={moveJob}
                       onDelete={deleteJob}
                       onAttach={attachCv}
+                      onSetDates={setJobDates}
                     />
                   ))}
                   {columnJobs.length === 0 && (
@@ -1323,6 +1340,7 @@ function JobCard({
   onMove,
   onDelete,
   onAttach,
+  onSetDates,
 }: {
   job: Job;
   cvs: CvMeta[];
@@ -1330,7 +1348,9 @@ function JobCard({
   onMove: (id: string, status: JobStatus) => void;
   onDelete: (id: string) => void;
   onAttach: (jobId: string, cvId: string) => void;
+  onSetDates: (id: string, deadline: string, followUpDate: string) => void;
 }) {
+  const [editDates, setEditDates] = useState(false);
   // Only treat a CV as attached if it still exists in the list.
   const attachedId =
     job.cvId && cvs.some((c) => c.id === job.cvId) ? job.cvId : "";
@@ -1389,6 +1409,45 @@ function JobCard({
           )}
         </div>
       )}
+
+      <div className="mt-2">
+        <button
+          onClick={() => setEditDates((v) => !v)}
+          className="text-[11px] text-zinc-500 transition hover:text-zinc-300"
+        >
+          {editDates
+            ? "Hide dates"
+            : job.deadline || job.followUpDate
+              ? "✎ Edit dates"
+              : "📅 Add deadline / follow-up"}
+        </button>
+        {editDates && (
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+              Deadline
+              <input
+                type="date"
+                value={job.deadline ?? ""}
+                onChange={(e) =>
+                  onSetDates(job.id, e.target.value, job.followUpDate ?? "")
+                }
+                className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/70"
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+              Follow-up
+              <input
+                type="date"
+                value={job.followUpDate ?? ""}
+                onChange={(e) =>
+                  onSetDates(job.id, job.deadline ?? "", e.target.value)
+                }
+                className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/70"
+              />
+            </label>
+          </div>
+        )}
+      </div>
 
       {job.notes && (
         <p className="mt-2 line-clamp-3 text-xs text-zinc-500">{job.notes}</p>

@@ -11,14 +11,12 @@ import {
   dueStatus,
   needsAttention,
   filterJobs,
-  jobStats,
-  type DueStatus,
   type Job,
   type JobStatus,
 } from "@/lib/jobs";
 import { ADZUNA_COUNTRIES, type AdzunaJob } from "@/lib/adzuna";
 import { GULF_LOCATIONS } from "@/lib/jooble";
-import { supabase, syncEnabled } from "@/lib/supabase";
+import { getAccessToken, supabase, syncEnabled } from "@/lib/supabase";
 import {
   fetchRemoteJobs,
   upsertRemoteJobs,
@@ -29,14 +27,30 @@ import InsightsManager from "@/app/InsightsManager";
 import PrepPrompt from "@/app/PrepPrompt";
 import Bookmarklet from "@/app/Bookmarklet";
 import DataBackup from "@/app/DataBackup";
+import JobCard from "@/app/components/JobCard";
+import Dashboard from "@/app/components/Dashboard";
+import ContactChips from "@/app/components/ContactChips";
+import AnalysisModal from "@/app/components/AnalysisModal";
+import DemoCvs from "@/app/components/DemoCvs";
+import { EmptyState, Field, inputClass } from "@/app/components/ui";
 import { getAllCvs } from "@/lib/cvStore";
 import { fetchRemoteCvs } from "@/lib/cvsRemote";
-import { roleLabel, type CvRole } from "@/lib/cvs";
+import type { CvMeta } from "@/lib/cvs";
+import {
+  cleanCapturedNotes,
+  extractContacts,
+  splitStoredContacts,
+  type StoredContact,
+} from "@/lib/contacts";
+import {
+  requestAnalysis,
+  requestExtraction,
+  type CapturePayload,
+} from "@/lib/ai/clientApi";
+import type { StoredAnalysis } from "@/lib/ai/schemas";
+import { DEMO_CVS, buildDemoJobs, demoAnalysis } from "@/lib/demo";
 
 type View = "jobs" | "cvs" | "insights";
-
-// A lightweight view of a stored CV — just what a job card needs to show.
-type CvMeta = { id: string; name: string; role: CvRole };
 
 // Where jobs are saved inside your browser. The "v1" lets us change the
 // shape later without clashing with old saved data.
@@ -54,10 +68,6 @@ const EMPTY_FORM = {
   deadline: "",
   followUpDate: "",
 };
-
-// Shared styling for text inputs / selects so they all look the same.
-const inputClass =
-  "rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-accent/70";
 
 // How many search results to show per page.
 const SEARCH_PAGE_SIZE = 30;
@@ -79,9 +89,37 @@ export default function Home() {
   const [authMsg, setAuthMsg] = useState(""); // feedback under the sign-in form
   const [notifying, setNotifying] = useState(false); // WhatsApp summary in flight
   const [notifyMsg, setNotifyMsg] = useState(""); // WhatsApp send feedback
+  const [isOwner, setIsOwner] = useState(false); // signed in as the account owner?
   const jobsRef = useRef<Job[]>([]); // always-current jobs, for use inside effects
-  jobsRef.current = jobs;
   const lastSyncedRef = useRef<Map<string, string>>(new Map()); // id -> JSON last pushed
+
+  // Demo mode (?demo=1): sample data, nothing saved or synced, canned AI results.
+  const [demo, setDemo] = useState(false);
+
+  // AI fit analysis
+  const [analysisJobId, setAnalysisJobId] = useState<string | null>(null); // modal open for this job
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null); // request in flight
+  const [aiMsg, setAiMsg] = useState(""); // last AI error, shown to the user
+
+  // AI-assisted capture: the bookmarklet's payload, and how the cleanup is going.
+  const [capture, setCapture] = useState<CapturePayload | null>(null);
+  const [aiStatus, setAiStatus] = useState<"idle" | "working" | "done" | "failed">(
+    "idle",
+  );
+  const [formContactsAi, setFormContactsAi] = useState<StoredContact[] | null>(
+    null,
+  );
+  const captureRef = useRef<CapturePayload | null>(null); // the live capture, for stale-result checks
+  const enrichedRef = useRef<CapturePayload | null>(null); // the capture already sent to the AI
+
+  // Keep the always-current refs in step with state (refs must not be written
+  // during render).
+  useEffect(() => {
+    jobsRef.current = jobs;
+  }, [jobs]);
+  useEffect(() => {
+    captureRef.current = capture;
+  }, [capture]);
 
   // Filters
   const [country, setCountry] = useState("");
@@ -109,8 +147,18 @@ export default function Home() {
   const [sPooled, setSPooled] = useState(false); // true when paging a local pool
   const [sSort, setSSort] = useState<"relevance" | "date">("relevance");
 
-  // Load saved jobs once, when the page first opens (browser only).
+  // Load saved jobs once, when the page first opens (browser only). Reading
+  // localStorage has to wait until after mount so the server-rendered HTML and the
+  // first client render match — hence setState inside the effect.
+  /* eslint-disable react-hooks/set-state-in-effect -- client-only state is hydrated after mount on purpose */
   useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("demo") === "1") {
+      // Demo mode: show sample data and never touch storage or the cloud. We
+      // leave `loaded` false, which keeps the save and sync effects switched off.
+      setDemo(true);
+      setJobs(buildDemoJobs(new Date()));
+      return;
+    }
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) setJobs(JSON.parse(raw) as Job[]);
@@ -125,6 +173,7 @@ export default function Home() {
   useEffect(() => {
     setTodayIso(new Date().toISOString().slice(0, 10));
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Watch auth state: restore an existing session and react to sign-in/out.
   useEffect(() => {
@@ -139,6 +188,7 @@ export default function Home() {
         setUser({ id: u.id, email: u.email ?? "" });
       } else {
         setUser(null);
+        setIsOwner(false);
         setCloudReady(false);
         lastSyncedRef.current = new Map();
         setSyncStatus("idle");
@@ -146,6 +196,29 @@ export default function Home() {
     });
     return () => sub.subscription.unsubscribe();
   }, []);
+
+  // After sign-in, ask the server whether this account is the owner — WhatsApp
+  // summaries go to the owner's phone, so only the owner sees that button.
+  useEffect(() => {
+    if (!user) return;
+    let cancelled = false;
+    (async () => {
+      const token = await getAccessToken();
+      if (!token) return;
+      try {
+        const res = await fetch("/api/notify", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!cancelled) setIsOwner(res.ok && body.owner === true);
+      } catch {
+        if (!cancelled) setIsOwner(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
 
   // On sign-in: pull the user's jobs from the cloud, merge in any local-only
   // jobs (a one-time migration), then switch the board to the merged set.
@@ -233,8 +306,7 @@ export default function Home() {
     setNotifying(true);
     setNotifyMsg("");
     try {
-      const { data } = await supabase.auth.getSession();
-      const token = data.session?.access_token;
+      const token = await getAccessToken();
       if (!token) {
         setNotifyMsg("Please sign in again.");
         return;
@@ -266,7 +338,7 @@ export default function Home() {
   // Refresh the list of attachable CVs whenever the Jobs tab is shown, so CVs
   // uploaded in the CVs tab show up here too.
   useEffect(() => {
-    if (view !== "jobs") return;
+    if (view !== "jobs" || demo) return;
     let cancelled = false;
     (async () => {
       try {
@@ -294,35 +366,96 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [view, user]);
+  }, [view, user, demo]);
 
   // If opened via the bookmarklet (URL has ?fh_ params), pre-fill and open the
   // Add-a-job form, then clean the URL so a refresh doesn't re-add the job.
+  /* eslint-disable react-hooks/set-state-in-effect -- reads the URL once after mount */
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    if (params.get("demo") === "1") return;
     const title = params.get("fh_title");
     const url = params.get("fh_url");
     if (!title && !url) return;
-    setForm({
-      ...EMPTY_FORM,
+    const captured: CapturePayload = {
       title: title ?? "",
       company: params.get("fh_company") ?? "",
       url: url ?? "",
       salary: params.get("fh_salary") ?? "",
-      notes: cleanCapturedNotes(params.get("fh_notes") ?? ""),
+      text: cleanCapturedNotes(params.get("fh_notes") ?? ""),
+    };
+    setForm({
+      ...EMPTY_FORM,
+      title: captured.title,
+      company: captured.company,
+      url: captured.url,
+      salary: captured.salary,
+      notes: captured.text,
     });
+    setCapture(captured); // lets the AI tidy it up once we know who is signed in
     setView("jobs");
     setShowForm(true);
     window.history.replaceState({}, "", window.location.pathname);
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // AI cleanup of a captured job (signed-in users only). The pre-filled form is
+  // already usable; when the AI answers we improve fields the user hasn't touched
+  // and attach the verified, named contacts. Failures are silent — the capture
+  // simply stays as the bookmarklet filled it.
+  useEffect(() => {
+    if (!capture || !user || enrichedRef.current === capture) return;
+    enrichedRef.current = capture;
+    (async () => {
+      setAiStatus("working");
+      const token = await getAccessToken();
+      if (!token) {
+        setAiStatus("idle");
+        return;
+      }
+      const res = await requestExtraction(token, capture);
+      if (captureRef.current !== capture) return; // saved or cancelled meanwhile
+      if (!res.ok) {
+        setAiStatus("failed");
+        return;
+      }
+      const x = res.value;
+      setForm((f) => ({
+        ...f,
+        title: f.title === capture.title && x.title ? x.title : f.title,
+        company: f.company === capture.company && x.company ? x.company : f.company,
+        country: f.country === EMPTY_FORM.country && x.country ? x.country : f.country,
+        salary: f.salary === capture.salary && x.salary ? x.salary : f.salary,
+        deadline: f.deadline || x.deadline,
+      }));
+      setFormContactsAi(x.contacts.length ? x.contacts : null);
+      setAiStatus("done");
+    })();
+  }, [capture, user]);
 
   const visible = useMemo(
     () => filterJobs(jobs, { country, query }),
     [jobs, country, query],
   );
 
-  // Contacts detected in the add-job form's notes, shown up front while editing.
-  const formContacts = extractContacts(form.notes);
+  // Contacts shown in the add-job form: the AI's verified, named ones when we have
+  // them, otherwise whatever the notes text yields.
+  const formContacts = formContactsAi
+    ? splitStoredContacts(formContactsAi)
+    : extractContacts(form.notes);
+
+  // One line telling the user what the AI is doing with a freshly captured job.
+  const captureHint = !capture
+    ? ""
+    : aiStatus === "working"
+      ? "✨ Cleaning this up with AI…"
+      : aiStatus === "done"
+        ? "✨ Cleaned up with AI — contacts and fields were checked against the posting."
+        : aiStatus === "failed"
+          ? "AI cleanup wasn't available this time, so the capture is shown as-is."
+          : !user && syncEnabled && !demo
+            ? "💡 Sign in and AI will clean up captured jobs and spot named contacts."
+            : "";
 
   // How many still-active jobs have a follow-up or deadline that needs attention.
   const dueCount = useMemo(() => {
@@ -357,10 +490,19 @@ export default function Home() {
       dateAdded: new Date().toISOString(),
       deadline: form.deadline || undefined,
       followUpDate: form.followUpDate || undefined,
+      contacts: formContactsAi ?? undefined,
     };
     setJobs((prev) => [job, ...prev]);
-    setForm(EMPTY_FORM);
+    resetForm();
     setShowForm(false);
+  }
+
+  // Clear the add-job form and any in-progress AI capture state.
+  function resetForm() {
+    setForm(EMPTY_FORM);
+    setFormContactsAi(null);
+    setCapture(null);
+    setAiStatus("idle");
   }
 
   function moveJob(id: string, status: JobStatus) {
@@ -392,6 +534,84 @@ export default function Home() {
       ),
     );
   }
+
+  // --- AI fit analysis -----------------------------------------------------
+
+  // Store an analysis on its job; it then syncs like any other job field.
+  function saveAnalysis(jobId: string, analysis: StoredAnalysis) {
+    setJobs((prev) =>
+      prev.map((j) => (j.id === jobId ? { ...j, analysis } : j)),
+    );
+  }
+
+  // Open a job's saved analysis, or run a fresh one if it has none yet.
+  function analyzeJob(job: Job) {
+    if (job.analysis) {
+      setAiMsg("");
+      setAnalysisJobId(job.id);
+      return;
+    }
+    void runAnalysis(job);
+  }
+
+  async function runAnalysis(job: Job) {
+    setAiMsg("");
+    if (!job.cvId) {
+      setAiMsg(
+        "Attach a CV to this job first (use the CV dropdown on its card), then analyze.",
+      );
+      return;
+    }
+    setAnalyzingId(job.id);
+    try {
+      if (demo) {
+        // No AI call in demo mode — show the canned sample after a short beat.
+        await new Promise((resolve) => setTimeout(resolve, 700));
+        saveAnalysis(job.id, demoAnalysis());
+        setAnalysisJobId(job.id);
+        return;
+      }
+      const token = await getAccessToken();
+      if (!token) {
+        setAiMsg("Please sign in to use AI features.");
+        return;
+      }
+      // Who to address the outreach to: the AI-extracted contacts if we have
+      // them, else the pattern-matched ones. A few are enough.
+      const found = extractContacts(job.notes);
+      const contacts = (
+        job.contacts?.length
+          ? job.contacts.map((c) => ({ name: c.name, role: c.role, value: c.value }))
+          : [...found.emails, ...found.phones].map((c) => ({
+              name: c.name,
+              role: "",
+              value: c.value,
+            }))
+      ).slice(0, 3);
+      const res = await requestAnalysis(token, {
+        title: job.title,
+        company: job.company,
+        description: job.notes,
+        cvId: job.cvId,
+        contacts,
+      });
+      if (!res.ok) {
+        setAiMsg(res.message);
+        return;
+      }
+      saveAnalysis(job.id, res.value);
+      setAnalysisJobId(job.id);
+    } finally {
+      setAnalyzingId(null);
+    }
+  }
+
+  // The job whose analysis modal is open, if any.
+  const analysisJob = jobs.find((j) => j.id === analysisJobId);
+  // CVs offered on job cards: samples in demo mode, the user's own otherwise.
+  const cvsForCards = demo ? DEMO_CVS : cvList;
+  // The analyze button needs a signed-in user (or demo mode's canned results).
+  const canAnalyze = demo || Boolean(user);
 
   // Ask our own /api/adzuna endpoint for real jobs, then show them.
   // Split "provider:value" into its two parts.
@@ -549,7 +769,17 @@ export default function Home() {
         </nav>
       </header>
 
-      {syncEnabled && (
+      {demo ? (
+        <div className="mt-4 rounded-xl border border-accent/30 bg-accent/10 px-4 py-2.5 text-sm text-zinc-200">
+          👀 <strong>Demo mode</strong> — sample data, nothing here is saved.
+          Open the first job and try <strong>✨ Analyze fit</strong>, search live
+          jobs, or poke around.{" "}
+          {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- full reload on purpose: demo mode is decided at page load */}
+          <a href="/" className="font-medium text-accent underline">
+            Exit demo
+          </a>
+        </div>
+      ) : syncEnabled && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm">
           {user ? (
             <>
@@ -565,17 +795,19 @@ export default function Home() {
                 </span>
               </span>
               <div className="flex flex-wrap items-center gap-2">
-                {notifyMsg && (
+                {isOwner && notifyMsg && (
                   <span className="text-xs text-zinc-400">{notifyMsg}</span>
                 )}
-                <button
-                  onClick={sendWhatsAppSummary}
-                  disabled={notifying}
-                  title="Send a job summary to your WhatsApp"
-                  className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-50"
-                >
-                  {notifying ? "Sending…" : "📲 WhatsApp me a summary"}
-                </button>
+                {isOwner && (
+                  <button
+                    onClick={sendWhatsAppSummary}
+                    disabled={notifying}
+                    title="Send a job summary to your WhatsApp"
+                    className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-50"
+                  >
+                    {notifying ? "Sending…" : "📲 WhatsApp me a summary"}
+                  </button>
+                )}
                 <button
                   onClick={signOut}
                   className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
@@ -590,7 +822,11 @@ export default function Home() {
                 🔒 Saved on this device only.{" "}
                 <span className="text-zinc-300">
                   Sign in to sync across devices:
-                </span>
+                </span>{" "}
+                {/* eslint-disable-next-line @next/next/no-html-link-for-pages -- full reload on purpose: demo mode is decided at page load */}
+                <a href="/?demo=1" className="text-accent underline">
+                  or try the demo
+                </a>
               </span>
               <form
                 onSubmit={sendMagicLink}
@@ -621,7 +857,7 @@ export default function Home() {
         </div>
       )}
 
-      {view === "cvs" && <CvManager />}
+      {view === "cvs" && (demo ? <DemoCvs /> : <CvManager />)}
 
       {view === "insights" && (
         <>
@@ -736,6 +972,9 @@ export default function Home() {
               onChange={(e) => setField("followUpDate", e.target.value)}
             />
           </Field>
+          {captureHint && (
+            <p className="text-xs text-zinc-400 sm:col-span-2">{captureHint}</p>
+          )}
           {(formContacts.emails.length > 0 ||
             formContacts.phones.length > 0) && (
             <div className="flex flex-col gap-1.5 sm:col-span-2">
@@ -769,7 +1008,7 @@ export default function Home() {
             <button
               type="button"
               onClick={() => {
-                setForm(EMPTY_FORM);
+                resetForm();
                 setShowForm(false);
               }}
               className="rounded-lg border border-white/15 px-4 py-2 text-sm font-medium text-zinc-300 transition hover:bg-white/5"
@@ -958,6 +1197,19 @@ export default function Home() {
         </section>
       )}
 
+      {aiMsg && !analysisJob && (
+        <div className="mt-6 flex items-start justify-between gap-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-4 py-2.5 text-sm text-amber-200">
+          <span>✨ {aiMsg}</span>
+          <button
+            onClick={() => setAiMsg("")}
+            aria-label="Dismiss"
+            className="shrink-0 text-amber-300/70 transition hover:text-amber-200"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
       {jobs.length > 0 && <Dashboard jobs={jobs} todayIso={todayIso} />}
 
       {dueCount > 0 && (
@@ -1013,12 +1265,15 @@ export default function Home() {
                     <JobCard
                       key={job.id}
                       job={job}
-                      cvs={cvList}
+                      cvs={cvsForCards}
                       todayIso={todayIso}
+                      canAnalyze={canAnalyze}
+                      analyzing={analyzingId === job.id}
                       onMove={moveJob}
                       onDelete={deleteJob}
                       onAttach={attachCv}
                       onSetDates={setJobDates}
+                      onAnalyze={analyzeJob}
                     />
                   ))}
                   {columnJobs.length === 0 && (
@@ -1035,491 +1290,22 @@ export default function Home() {
         </>
       )}
 
-      <DataBackup />
-    </div>
-  );
-}
-
-/** Strip LinkedIn's trailing "…more" / "see more" toggle text from a captured note. */
-function cleanCapturedNotes(s: string): string {
-  return s
-    .replace(/\s*(?:…|\.\.\.)\s*(?:more|less)\s*$/i, "")
-    .replace(/\n\s*(?:see|show)\s+(?:more|less)\s*$/i, "")
-    .trim();
-}
-
-/** A contact (email or phone) plus a best-effort guess at whose it is. */
-type Contact = { value: string; name: string };
-
-/** Capitalised words that can follow a trigger but aren't people, to avoid false labels. */
-const NAME_STOP = new Set(
-  "center centre team staff group office division department board call email phone mobile product owner manager senior junior lead role job apply now today please about we you your our us me the this that here there remote onsite hybrid monday tuesday wednesday thursday friday saturday sunday january february march april may june july august september october november december".split(
-    " ",
-  ),
-);
-function looksLikeName(s: string): boolean {
-  return !!s && !NAME_STOP.has(s.split(/\s+/)[0].toLowerCase());
-}
-
-/** Best-effort: find a person's name mentioned right next to a contact in the text.
- *  Requires a trigger word ("contact/call/reach out to…") immediately followed by a
- *  Capitalised name — case-sensitive on the name so we don't grab "us"/"today". */
-function nameNear(text: string, value: string): string {
-  const idx = text.indexOf(value);
-  if (idx < 0) return "";
-  const before = text.slice(Math.max(0, idx - 90), idx);
-  const after = text.slice(idx + value.length, idx + value.length + 60);
-  const re =
-    /(?:[Cc]ontact|[Cc]all|[Rr]each(?:\s+out)?(?:\s+to)?|[Ss]peak\s+(?:to|with)|[Aa]sk\s+for|[Aa]ttention|[Aa]ttn|[Rr]egards|[Ss]incerely|[Ee]mail|[Mm]essage)[\s:,]+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})/g;
-  let m: RegExpExecArray | null;
-  let last = "";
-  while ((m = re.exec(before)) !== null) if (looksLikeName(m[1])) last = m[1];
-  if (last) return last.trim();
-  re.lastIndex = 0;
-  while ((m = re.exec(after)) !== null)
-    if (looksLikeName(m[1])) return m[1].trim();
-  return "";
-}
-
-/** Derive a name from an email local part (rob → Rob), skipping role addresses. */
-function nameFromEmail(email: string): string {
-  const local = email.split("@")[0] || "";
-  if (
-    /^(careers?|jobs?|hr|info|admin|hello|contact|recruit(?:ing|ment)?|talent|apply|applications?|team|support|office|no-?reply|enquir(?:y|ies)|sales|marketing)$/i.test(
-      local,
-    )
-  )
-    return "";
-  const parts = local.split(/[._-]+/).filter((p) => /^[A-Za-z]{2,15}$/.test(p));
-  if (parts.length === 0 || parts.length > 3) return "";
-  return parts
-    .map((p) => p[0].toUpperCase() + p.slice(1).toLowerCase())
-    .join(" ");
-}
-
-/** Pull email + phone contacts out of a job's notes, each with a best-effort name. */
-function extractContacts(text: string): { emails: Contact[]; phones: Contact[] } {
-  if (!text) return { emails: [], phones: [] };
-  const uniqBy = (arr: Contact[]) => {
-    const seen = new Set<string>();
-    return arr.filter((c) =>
-      seen.has(c.value) ? false : (seen.add(c.value), true),
-    );
-  };
-  const emailStrs =
-    text.match(/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g) || [];
-  const phoneStrs = (
-    text.match(/(\+\d[\d ().\-]{6,}\d)|(\b0\d[\d ().\-]{7,}\d)/g) || []
-  ).filter((p) => {
-    const g = p.replace(/\D/g, "");
-    return g.length >= 8 && g.length <= 15;
-  });
-  const emails = uniqBy(
-    emailStrs.map((e) => {
-      const v = e.trim();
-      return { value: v, name: nameNear(text, v) || nameFromEmail(v) };
-    }),
-  );
-  const phones = uniqBy(
-    phoneStrs.map((p) => {
-      const v = p.trim();
-      return { value: v, name: nameNear(text, v) };
-    }),
-  );
-  return { emails, phones };
-}
-
-/** A single contact pill you can click to copy (text stays selectable too).
- *  Shows a best-effort person name in front of the value when one was found. */
-function ContactChip({
-  icon,
-  value,
-  name,
-}: {
-  icon: string;
-  value: string;
-  name?: string;
-}) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(value);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // clipboard may be blocked; the text is still selectable to copy by hand
-    }
-  }
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      title={name ? `Click to copy ${value} (${name})` : `Click to copy ${value}`}
-      className="max-w-full cursor-copy select-text truncate rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-accent transition hover:bg-accent/20"
-    >
-      {copied ? (
-        "Copied ✓"
-      ) : (
-        <>
-          {icon} {name && <span className="font-semibold">{name} · </span>}
-          {value}
-        </>
-      )}
-    </button>
-  );
-}
-
-/** Click-to-copy email / phone chips, shared by the add-job form and job cards. */
-function ContactChips({
-  emails,
-  phones,
-}: {
-  emails: Contact[];
-  phones: Contact[];
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 text-xs">
-      {emails.map((e) => (
-        <ContactChip key={e.value} icon="✉" value={e.value} name={e.name} />
-      ))}
-      {phones.map((p) => (
-        <ContactChip key={p.value} icon="☎" value={p.value} name={p.name} />
-      ))}
-    </div>
-  );
-}
-
-/** A date pill that turns red when overdue and amber when due today/soon. */
-function DateBadge({
-  label,
-  dateIso,
-  todayIso,
-}: {
-  label: string;
-  dateIso: string;
-  todayIso: string;
-}) {
-  const status: DueStatus = dueStatus(dateIso, todayIso);
-  const color =
-    status === "overdue"
-      ? "text-red-300 border-red-400/40 bg-red-400/10"
-      : status === "today" || status === "soon"
-        ? "text-amber-300 border-amber-400/40 bg-amber-400/10"
-        : "text-zinc-300 border-white/10 bg-black/30";
-  const when = new Date(`${dateIso}T00:00:00`).toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-  });
-  const suffix =
-    status === "overdue" ? " · overdue" : status === "today" ? " · today" : "";
-  return (
-    <span className={`rounded-full border px-2 py-0.5 ${color}`}>
-      {label}: {when}
-      {suffix}
-    </span>
-  );
-}
-
-/** Bar colours per pipeline stage for the funnel bar. */
-const BAR_COLORS: Record<JobStatus, string> = {
-  interested: "bg-sky-400/70",
-  applied: "bg-amber-400/70",
-  interview: "bg-violet-400/70",
-  offer: "bg-emerald-400/70",
-  rejected: "bg-zinc-500/70",
-};
-
-/** A single stat tile: a big count with a label, tinted per stage. */
-function StatTile({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number;
-  accent: string;
-}) {
-  return (
-    <div
-      className={`flex min-w-[4.5rem] flex-1 flex-col rounded-lg border px-3 py-2 ${accent}`}
-    >
-      <span className="text-xl font-bold leading-none">{value}</span>
-      <span className="mt-1 text-xs opacity-80">{label}</span>
-    </div>
-  );
-}
-
-/** Pipeline dashboard: stage tiles, a funnel bar, and a couple of key metrics. */
-function Dashboard({ jobs, todayIso }: { jobs: Job[]; todayIso: string }) {
-  const stats = jobStats(jobs);
-  const weekAgo = todayIso
-    ? new Date(new Date(`${todayIso}T00:00:00`).getTime() - 6 * 86_400_000)
-        .toISOString()
-        .slice(0, 10)
-    : "";
-  const addedThisWeek = weekAgo
-    ? jobs.filter((j) => (j.dateAdded || "").slice(0, 10) >= weekAgo).length
-    : 0;
-  return (
-    <section className="mt-6 rounded-xl border border-white/10 bg-white/5 p-4">
-      <div className="flex flex-wrap gap-2">
-        <StatTile
-          label="Total"
-          value={stats.total}
-          accent="border-white/15 bg-white/5 text-zinc-100"
+      {analysisJob?.analysis && (
+        <AnalysisModal
+          key={analysisJob.id}
+          job={analysisJob}
+          analysis={analysisJob.analysis}
+          busy={analyzingId === analysisJob.id}
+          error={aiMsg}
+          onRerun={() => void runAnalysis(analysisJob)}
+          onClose={() => {
+            setAnalysisJobId(null);
+            setAiMsg("");
+          }}
         />
-        {STATUSES.map((s) => (
-          <StatTile
-            key={s.id}
-            label={s.label}
-            value={stats.byStatus[s.id]}
-            accent={s.accent}
-          />
-        ))}
-      </div>
-
-      {stats.total > 0 && (
-        <div
-          className="mt-4 flex h-2.5 w-full overflow-hidden rounded-full bg-black/30"
-          title="Share of jobs in each stage"
-        >
-          {STATUSES.map((s) => {
-            const pct = (stats.byStatus[s.id] / stats.total) * 100;
-            return pct > 0 ? (
-              <div
-                key={s.id}
-                style={{ width: `${pct}%` }}
-                className={BAR_COLORS[s.id]}
-                title={`${s.label}: ${stats.byStatus[s.id]}`}
-              />
-            ) : null;
-          })}
-        </div>
       )}
 
-      <div className="mt-4 flex flex-wrap gap-x-6 gap-y-1 text-sm text-zinc-400">
-        <span>
-          Response rate:{" "}
-          <strong className="text-zinc-100">
-            {Math.round(stats.responseRate * 100)}%
-          </strong>{" "}
-          <span className="text-zinc-500">
-            (interviews + offers vs. all {stats.appliedOrBeyond} you applied to)
-          </span>
-        </span>
-        <span>
-          Added this week:{" "}
-          <strong className="text-zinc-100">{addedThisWeek}</strong>
-        </span>
-      </div>
-    </section>
-  );
-}
-
-/** A labelled form field wrapper. */
-function Field({
-  label,
-  children,
-}: {
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex flex-col gap-1.5 text-sm">
-      <span className="font-medium text-zinc-300">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-/** A single job card shown inside a board column. */
-function JobCard({
-  job,
-  cvs,
-  todayIso,
-  onMove,
-  onDelete,
-  onAttach,
-  onSetDates,
-}: {
-  job: Job;
-  cvs: CvMeta[];
-  todayIso: string;
-  onMove: (id: string, status: JobStatus) => void;
-  onDelete: (id: string) => void;
-  onAttach: (jobId: string, cvId: string) => void;
-  onSetDates: (id: string, deadline: string, followUpDate: string) => void;
-}) {
-  const [editDates, setEditDates] = useState(false);
-  // Only treat a CV as attached if it still exists in the list.
-  const attachedId =
-    job.cvId && cvs.some((c) => c.id === job.cvId) ? job.cvId : "";
-  // Contacts lifted out of the notes, shown up front so you don't have to scroll.
-  const contacts = extractContacts(job.notes);
-  const hasContacts = contacts.emails.length > 0 || contacts.phones.length > 0;
-  return (
-    <article className="rounded-xl border border-white/10 bg-white/5 p-3.5 transition hover:border-white/20">
-      <div className="flex items-start justify-between gap-2">
-        <h3 className="text-sm font-semibold leading-snug text-zinc-100">
-          {job.title}
-        </h3>
-        <button
-          onClick={() => onDelete(job.id)}
-          aria-label="Delete job"
-          title="Delete"
-          className="shrink-0 rounded p-1 text-zinc-500 transition hover:bg-white/10 hover:text-red-400"
-        >
-          ✕
-        </button>
-      </div>
-      <p className="mt-0.5 text-sm text-zinc-400">{job.company}</p>
-
-      {hasContacts && (
-        <div className="mt-2">
-          <ContactChips emails={contacts.emails} phones={contacts.phones} />
-        </div>
-      )}
-
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-        <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-zinc-300">
-          {job.country}
-        </span>
-        {job.salary && (
-          <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-zinc-300">
-            {job.salary}
-          </span>
-        )}
-      </div>
-
-      {(job.deadline || job.followUpDate) && (
-        <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
-          {job.deadline && (
-            <DateBadge
-              label="⏳ Deadline"
-              dateIso={job.deadline}
-              todayIso={todayIso}
-            />
-          )}
-          {job.followUpDate && (
-            <DateBadge
-              label="🔔 Follow-up"
-              dateIso={job.followUpDate}
-              todayIso={todayIso}
-            />
-          )}
-        </div>
-      )}
-
-      <div className="mt-2">
-        <button
-          onClick={() => setEditDates((v) => !v)}
-          className="text-[11px] text-zinc-500 transition hover:text-zinc-300"
-        >
-          {editDates
-            ? "Hide dates"
-            : job.deadline || job.followUpDate
-              ? "✎ Edit dates"
-              : "📅 Add deadline / follow-up"}
-        </button>
-        {editDates && (
-          <div className="mt-2 grid grid-cols-2 gap-2">
-            <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
-              Deadline
-              <input
-                type="date"
-                value={job.deadline ?? ""}
-                onChange={(e) =>
-                  onSetDates(job.id, e.target.value, job.followUpDate ?? "")
-                }
-                className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/70"
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
-              Follow-up
-              <input
-                type="date"
-                value={job.followUpDate ?? ""}
-                onChange={(e) =>
-                  onSetDates(job.id, job.deadline ?? "", e.target.value)
-                }
-                className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/70"
-              />
-            </label>
-          </div>
-        )}
-      </div>
-
-      {job.notes && (
-        <p className="mt-2 line-clamp-3 text-xs text-zinc-500">{job.notes}</p>
-      )}
-
-      <div className="mt-3 flex items-center justify-between gap-2">
-        <select
-          value={job.status}
-          onChange={(e) => onMove(job.id, e.target.value as JobStatus)}
-          className="rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-200 outline-none focus:border-accent/70"
-        >
-          {STATUSES.map((s) => (
-            <option key={s.id} value={s.id}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-        {job.url && (
-          <a
-            href={job.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs font-medium text-accent hover:underline"
-          >
-            Open ↗
-          </a>
-        )}
-      </div>
-
-      <div className="mt-2">
-        {cvs.length === 0 ? (
-          <p className="text-[11px] text-zinc-600">
-            No CVs yet — add one in the CVs tab to attach it.
-          </p>
-        ) : (
-          <select
-            value={attachedId}
-            onChange={(e) => onAttach(job.id, e.target.value)}
-            className="w-full rounded-md border border-white/10 bg-black/30 px-2 py-1 text-xs text-zinc-300 outline-none focus:border-accent/70"
-          >
-            <option value="">— No CV attached —</option>
-            {cvs.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} ({roleLabel(c.role)})
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
-      <p className="mt-2 text-[11px] text-zinc-600">
-        Added {new Date(job.dateAdded).toLocaleDateString()}
-      </p>
-    </article>
-  );
-}
-
-/** Shown when there are no jobs saved yet. */
-function EmptyState({ onAdd }: { onAdd: () => void }) {
-  return (
-    <div className="mt-16 flex flex-col items-center justify-center rounded-2xl border border-dashed border-white/10 py-20 text-center">
-      <p className="text-lg font-semibold text-zinc-200">No jobs yet</p>
-      <p className="mt-1 max-w-sm text-sm text-zinc-500">
-        Add the first role you want to chase. You can paste anything you find
-        online.
-      </p>
-      <button
-        onClick={onAdd}
-        className="mt-5 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-black transition hover:opacity-90"
-      >
-        + Add your first job
-      </button>
+      {!demo && <DataBackup />}
     </div>
   );
 }

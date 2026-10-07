@@ -3,6 +3,9 @@
 // No React and no browser APIs here — this file just describes the shape of
 // the data and knows how to filter it. That keeps it easy to test and reuse.
 
+import type { StoredContact } from "./contacts";
+import type { StoredAnalysis } from "./ai/schemas";
+
 // localStorage key where the job list is saved (shared with the backup tool).
 export const JOBS_STORAGE_KEY = "firehunt.jobs.v1";
 
@@ -26,6 +29,8 @@ export interface Job {
   cvId?: string; // id of the CV attached to this application (optional)
   deadline?: string; // application deadline, "YYYY-MM-DD" (optional)
   followUpDate?: string; // next planned follow-up, "YYYY-MM-DD" (optional)
+  contacts?: StoredContact[]; // AI-extracted recruiter contacts (optional)
+  analysis?: StoredAnalysis; // saved AI fit analysis (optional)
 }
 
 export interface StatusMeta {

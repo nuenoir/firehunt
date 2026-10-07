@@ -67,13 +67,16 @@ export interface JobSummaryRow {
 
 /** Count the jobs and produce the digest text — shared by the cron job and the
  *  "send now" button so they always say the same thing. */
-export function summarizeJobs(rows: JobSummaryRow[]): {
+export function summarizeJobs(
+  rows: JobSummaryRow[],
+  now: number = Date.now(),
+): {
   text: string;
   summary: { total: number; followUps: number; deadlines: number };
 } {
   const total = rows.length;
   const offset = (days: number) =>
-    new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+    new Date(now + days * 86_400_000).toISOString().slice(0, 10);
   const today = offset(0);
   const w1 = offset(7);
   const w2 = offset(14);

@@ -11,6 +11,12 @@
 
 import { mapJoobleResults, GULF_LOCATIONS } from "@/lib/jooble";
 import type { AdzunaJob } from "@/lib/adzuna";
+import { getAdminClient } from "@/lib/server/admin";
+import {
+  checkRateLimit,
+  clientIp,
+  tooManyRequests,
+} from "@/lib/server/rateLimit";
 
 async function fetchJooble(
   key: string,
@@ -33,6 +39,27 @@ async function fetchJooble(
 }
 
 export async function GET(request: Request) {
+  // Protect the shared Jooble quota: 30 searches per minute per IP. "All Gulf"
+  // fans out to six upstream calls, so it costs six units against the limit.
+  const isAllGulf =
+    new URL(request.url).searchParams.get("location") === "ALL_GULF";
+  const admin = getAdminClient();
+  for (let i = 0; i < (isAllGulf ? 6 : 1); i++) {
+    const allowed = await checkRateLimit(
+      admin,
+      `search:${clientIp(request)}`,
+      60,
+      30,
+      "allow",
+    );
+    if (!allowed) {
+      return tooManyRequests(
+        "Too many searches. Please wait a minute and try again.",
+        60,
+      );
+    }
+  }
+
   const key = process.env.JOOBLE_API_KEY;
 
   if (!key || key === "your_jooble_key_here") {

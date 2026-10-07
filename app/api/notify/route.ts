@@ -1,36 +1,43 @@
 // app/api/notify/route.ts
-// The "Send me a summary now" button posts here. It authenticates with the
-// signed-in user's own token (so only you can trigger your own WhatsApp), reads
-// your jobs through RLS, and sends the same digest the daily job sends.
+// The "WhatsApp me a summary" button. WhatsApp messages go to the OWNER's phone, so
+// only the owner's signed-in session may trigger them — anyone else who signs in
+// with a magic link gets a 403. The jobs are read through the caller's own session
+// (row-level security), then summarised exactly as the daily digest does.
+//
+//   GET  -> { owner: boolean }   lets the UI show the button only to the owner
+//   POST -> sends the summary
 
-import { createClient } from "@supabase/supabase-js";
+import { authenticate } from "@/lib/server/auth";
+import { getAdminClient } from "@/lib/server/admin";
+import { resolveOwnerId } from "@/lib/server/owner";
 import { sendWhatsApp, summarizeJobs, type JobSummaryRow } from "@/lib/notify";
 
+/** Is the signed-in caller the owner? Fails closed if it can't be determined. */
+async function callerIsOwner(userId: string): Promise<boolean> {
+  const admin = getAdminClient();
+  if (!admin) return false;
+  const ownerId = await resolveOwnerId(admin);
+  return ownerId !== null && ownerId === userId;
+}
+
+export async function GET(request: Request) {
+  const auth = await authenticate(request);
+  if (auth instanceof Response) return auth;
+  return Response.json({ owner: await callerIsOwner(auth.user.id) });
+}
+
 export async function POST(request: Request) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !anon) {
-    return Response.json({ error: "Sync is not configured." }, { status: 500 });
+  const auth = await authenticate(request);
+  if (auth instanceof Response) return auth;
+
+  if (!(await callerIsOwner(auth.user.id))) {
+    return Response.json(
+      { error: "WhatsApp summaries are only available to the account owner." },
+      { status: 403 },
+    );
   }
 
-  const authHeader = request.headers.get("authorization") || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-  if (!token) {
-    return Response.json({ error: "Not signed in." }, { status: 401 });
-  }
-
-  // Scope the client to the user's token: this both verifies the session and
-  // makes the jobs query return only their own rows (via RLS).
-  const supabase = createClient(url, anon, {
-    global: { headers: { Authorization: `Bearer ${token}` } },
-    auth: { persistSession: false },
-  });
-  const { data: userData, error: userErr } = await supabase.auth.getUser(token);
-  if (userErr || !userData.user) {
-    return Response.json({ error: "Invalid session." }, { status: 401 });
-  }
-
-  const { data, error } = await supabase
+  const { data, error } = await auth.client
     .from("jobs")
     .select("status,deadline,follow_up_date");
   if (error) {

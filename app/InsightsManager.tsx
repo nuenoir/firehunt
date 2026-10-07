@@ -35,6 +35,7 @@ export default function InsightsManager() {
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- hydrate from localStorage after mount (keeps server and client renders identical)
       if (raw) setItems(JSON.parse(raw) as Insight[]);
     } catch {
       // ignore missing/corrupt data

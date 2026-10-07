@@ -34,6 +34,9 @@ export const CV_ROLES: CvRoleMeta[] = [
   },
 ];
 
+/** A lightweight view of a stored CV — just what a job card needs to show. */
+export type CvMeta = { id: string; name: string; role: CvRole };
+
 export const ACCEPTED_CV_EXTENSIONS = [".pdf", ".doc", ".docx"];
 export const MAX_CV_BYTES = 10 * 1024 * 1024; // 10 MB
 

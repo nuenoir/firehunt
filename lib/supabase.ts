@@ -22,3 +22,10 @@ export const supabase: SupabaseClient | null =
 
 /** True when sync is configured (keys present). */
 export const syncEnabled = supabase !== null;
+
+/** The signed-in user's access token (sent to our API routes), or null. */
+export async function getAccessToken(): Promise<string | null> {
+  if (!supabase) return null;
+  const { data } = await supabase.auth.getSession();
+  return data.session?.access_token ?? null;
+}

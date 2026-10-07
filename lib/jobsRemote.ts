@@ -5,9 +5,11 @@
 // translate in one place here.
 
 import type { Job, JobStatus } from "./jobs";
+import type { StoredContact } from "./contacts";
+import type { StoredAnalysis } from "./ai/schemas";
 import { supabase } from "./supabase";
 
-interface JobRow {
+export interface JobRow {
   id: string;
   title: string;
   company: string;
@@ -20,9 +22,13 @@ interface JobRow {
   deadline: string | null;
   follow_up_date: string | null;
   cv_id: string | null;
+  // Added by the AI features. Optional so rows (and databases) that predate them
+  // keep working.
+  contacts?: StoredContact[] | null;
+  analysis?: StoredAnalysis | null;
 }
 
-function fromRow(r: JobRow): Job {
+export function fromRow(r: JobRow): Job {
   return {
     id: r.id,
     title: r.title,
@@ -36,10 +42,12 @@ function fromRow(r: JobRow): Job {
     deadline: r.deadline ?? undefined,
     followUpDate: r.follow_up_date ?? undefined,
     cvId: r.cv_id ?? undefined,
+    contacts: r.contacts ?? undefined,
+    analysis: r.analysis ?? undefined,
   };
 }
 
-function toRow(j: Job, userId: string) {
+export function toRow(j: Job, userId: string) {
   return {
     id: j.id,
     user_id: userId,
@@ -55,6 +63,10 @@ function toRow(j: Job, userId: string) {
     follow_up_date: j.followUpDate ?? null,
     cv_id: j.cvId ?? null,
     updated_at: new Date().toISOString(),
+    // Only sent when present, so a database that hasn't had the AI columns added
+    // yet still accepts every ordinary job.
+    ...(j.contacts?.length ? { contacts: j.contacts } : {}),
+    ...(j.analysis ? { analysis: j.analysis } : {}),
   };
 }
 

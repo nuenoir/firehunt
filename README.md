@@ -12,6 +12,10 @@ The demo uses fictional sample data, saves nothing, and shows a canned AI analys
 
 Taken from [demo mode](https://firehunt.vercel.app/?demo=1), so everything shown is fictional sample data.
 
+![A short walkthrough: the board and dashboard, then opening a fit analysis, reading the evidence, gaps and reworded bullets, and switching the outreach draft from email to WhatsApp](docs/screenshots/demo.gif)
+
+*A 30-second tour: the board, then "Analyze fit" on a job, with the sample analysis and the email and WhatsApp outreach drafts.*
+
 ![The FireHunt pipeline board with a stage dashboard, deadline alerts, and job cards showing named recruiter contacts](docs/screenshots/board.jpg)
 
 *The pipeline board: stage dashboard with response rate, deadline and follow-up alerts, and job cards with click-to-copy recruiter contacts.*

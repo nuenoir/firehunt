@@ -90,6 +90,7 @@ export default function Home() {
   const [notifying, setNotifying] = useState(false); // WhatsApp summary in flight
   const [notifyMsg, setNotifyMsg] = useState(""); // WhatsApp send feedback
   const [isOwner, setIsOwner] = useState(false); // signed in as the account owner?
+  const [aiEnabled, setAiEnabled] = useState(false); // is live AI switched on server-side?
   const jobsRef = useRef<Job[]>([]); // always-current jobs, for use inside effects
   const lastSyncedRef = useRef<Map<string, string>>(new Map()); // id -> JSON last pushed
 
@@ -399,12 +400,21 @@ export default function Home() {
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Ask the server once whether live AI is switched on (an API key is configured).
+  // If not, the AI buttons stay hidden rather than showing ones that can only fail.
+  useEffect(() => {
+    fetch("/api/ai/status")
+      .then((res) => res.json())
+      .then((body) => setAiEnabled(body?.enabled === true))
+      .catch(() => setAiEnabled(false));
+  }, []);
+
   // AI cleanup of a captured job (signed-in users only). The pre-filled form is
   // already usable; when the AI answers we improve fields the user hasn't touched
   // and attach the verified, named contacts. Failures are silent — the capture
   // simply stays as the bookmarklet filled it.
   useEffect(() => {
-    if (!capture || !user || enrichedRef.current === capture) return;
+    if (!capture || !user || !aiEnabled || enrichedRef.current === capture) return;
     enrichedRef.current = capture;
     (async () => {
       setAiStatus("working");
@@ -431,7 +441,7 @@ export default function Home() {
       setFormContactsAi(x.contacts.length ? x.contacts : null);
       setAiStatus("done");
     })();
-  }, [capture, user]);
+  }, [capture, user, aiEnabled]);
 
   const visible = useMemo(
     () => filterJobs(jobs, { country, query }),
@@ -453,7 +463,7 @@ export default function Home() {
         ? "✨ Cleaned up with AI — contacts and fields were checked against the posting."
         : aiStatus === "failed"
           ? "AI cleanup wasn't available this time, so the capture is shown as-is."
-          : !user && syncEnabled && !demo
+          : !user && syncEnabled && !demo && aiEnabled
             ? "💡 Sign in and AI will clean up captured jobs and spot named contacts."
             : "";
 
@@ -610,8 +620,9 @@ export default function Home() {
   const analysisJob = jobs.find((j) => j.id === analysisJobId);
   // CVs offered on job cards: samples in demo mode, the user's own otherwise.
   const cvsForCards = demo ? DEMO_CVS : cvList;
-  // The analyze button needs a signed-in user (or demo mode's canned results).
-  const canAnalyze = demo || Boolean(user);
+  // The analyze button needs live AI plus a signed-in user — or demo mode, which
+  // shows canned sample results and works with no key at all.
+  const canAnalyze = demo || (Boolean(user) && aiEnabled);
 
   // Ask our own /api/adzuna endpoint for real jobs, then show them.
   // Split "provider:value" into its two parts.

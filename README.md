@@ -6,6 +6,8 @@ A job-application tracker for a multi-region job hunt (the Gulf, Australia, Sing
 
 The demo uses fictional sample data, saves nothing, and shows a canned AI analysis, so it costs nothing to run.
 
+> **AI status:** live AI is switched **off** on the hosted site for now. It needs a paid Anthropic API key, which I haven't funded, so the AI buttons are hidden for signed-in users and the demo shows a sample analysis instead. Everything else is live. The AI code is complete and tested (see [Testing](#testing)); setting `ANTHROPIC_API_KEY` switches it on.
+
 ## Why it exists
 
 Applying across several countries means tracking dozens of roles from different sites, remembering which CV went where, and noticing when a follow-up is overdue. Easy-Apply buttons also bury you in a pile of applicants; the better move is to message the recruiter directly. FireHunt is built around that: it captures a job from any page, pulls out the recruiter's contact details, and helps you write a personal message to them.
@@ -144,7 +146,7 @@ The schema is in `supabase/migrations/` and is idempotent. Run `001_init.sql` th
 ### Known limitations
 
 - Sync is last-write-wins with no live updates between open devices.
-- The AI features have been tested against a faked network and by unit tests, and I'm still to publish results from running the evals against the real API.
+- Live AI is off on the hosted site, and the AI features have so far only been tested with unit tests against a faked network. I haven't run the evals against the real API, so I'm not publishing any accuracy numbers.
 - Scanned PDFs and legacy `.doc` CVs can't be analysed.
 - The free Supabase plan pauses projects after about a week without activity.
 

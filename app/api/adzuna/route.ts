@@ -4,28 +4,12 @@
 // never shipped to the user's browser.
 
 import { mapAdzunaResults } from "@/lib/adzuna";
-import { getAdminClient } from "@/lib/server/admin";
-import {
-  checkRateLimit,
-  clientIp,
-  tooManyRequests,
-} from "@/lib/server/rateLimit";
+import { enforceSearchLimits } from "@/lib/server/searchLimits";
 
 export async function GET(request: Request) {
-  // Protect the shared Adzuna quota: 30 searches per minute per IP.
-  const allowed = await checkRateLimit(
-    getAdminClient(),
-    `search:${clientIp(request)}`,
-    60,
-    30,
-    "allow",
-  );
-  if (!allowed) {
-    return tooManyRequests(
-      "Too many searches. Please wait a minute and try again.",
-      60,
-    );
-  }
+  // Protect the shared Adzuna quota (per visitor and site-wide).
+  const limited = await enforceSearchLimits(request, "adzuna");
+  if (limited) return limited;
 
   const appId = process.env.ADZUNA_APP_ID;
   const appKey = process.env.ADZUNA_APP_KEY;

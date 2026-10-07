@@ -84,7 +84,7 @@ flowchart LR
 - **CV files** live in a private bucket under `{user-id}/{cv-id}`; storage policies restrict each user to their own folder. The AI route reads a CV through the caller's own session, so it can't be pointed at someone else's file.
 - **Secrets stay on the server.** Third-party API keys and the Supabase service key are plain (non-`NEXT_PUBLIC_`) environment variables used only in route handlers.
 - **Owner-only WhatsApp.** Anyone can sign in, but the daily digest and the "WhatsApp me a summary" button only work for the owner's account, because they message the owner's phone. The digest filters to the owner explicitly, since the service key bypasses row-level security.
-- **Rate limiting.** Search routes are limited per IP; AI calls are limited per user and globally. The limiter is a small Postgres function callable only with the service key.
+- **Rate limiting.** Search routes are limited per visitor (12 a minute) and site-wide per provider, because the job APIs rate-limit the shared key and one visitor could otherwise lock everyone out; AI calls are limited per user and globally. The limiter is a small Postgres function callable only with the service key.
 - **The cron endpoint** requires a bearer secret.
 
 ## Tech stack

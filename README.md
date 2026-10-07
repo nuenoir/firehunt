@@ -160,3 +160,7 @@ I built FireHunt with AI-assisted development (Claude Code), acting as the produ
 - Realtime sync between open devices
 - Twilio for WhatsApp, with per-user numbers
 - Published eval results and a regression gate in CI
+
+## License
+
+[MIT](LICENSE). You're free to use, copy and modify this code; please keep the copyright notice. The sample data in demo mode is fictional.

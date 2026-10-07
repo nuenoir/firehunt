@@ -8,6 +8,18 @@ The demo uses fictional sample data, saves nothing, and shows a canned AI analys
 
 > **AI status:** live AI is switched **off** on the hosted site for now. It needs a paid Anthropic API key, which I haven't funded, so the AI buttons are hidden for signed-in users and the demo shows a sample analysis instead. Everything else is live. The AI code is complete and tested (see [Testing](#testing)); setting `ANTHROPIC_API_KEY` switches it on.
 
+## Screenshots
+
+Taken from [demo mode](https://firehunt.vercel.app/?demo=1), so everything shown is fictional sample data.
+
+![The FireHunt pipeline board with a stage dashboard, deadline alerts, and job cards showing named recruiter contacts](docs/screenshots/board.jpg)
+
+*The pipeline board: stage dashboard with response rate, deadline and follow-up alerts, and job cards with click-to-copy recruiter contacts.*
+
+![A sample fit analysis with a score, evidence quoted from the CV, honest gaps, and reworded CV bullets](docs/screenshots/analyze-fit.jpg)
+
+*A sample "Analyze fit" result: every strength is shown next to the quote from the CV that supports it, gaps are listed honestly, and a confidence badge shows how much survived verification. (This is the canned demo output; live AI is off on the hosted site.)*
+
 ## Why it exists
 
 Applying across several countries means tracking dozens of roles from different sites, remembering which CV went where, and noticing when a follow-up is overdue. Easy-Apply buttons also bury you in a pile of applicants; the better move is to message the recruiter directly. FireHunt is built around that: it captures a job from any page, pulls out the recruiter's contact details, and helps you write a personal message to them.

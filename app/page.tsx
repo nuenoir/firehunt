@@ -16,6 +16,7 @@ import {
 } from "@/lib/jobs";
 import { ADZUNA_COUNTRIES, type AdzunaJob } from "@/lib/adzuna";
 import { GULF_LOCATIONS } from "@/lib/jooble";
+import { buildSearchView } from "@/lib/searchView";
 import { getAccessToken, supabase, syncEnabled } from "@/lib/supabase";
 import {
   fetchRemoteJobs,
@@ -86,6 +87,8 @@ const EMPTY_FORM = {
 
 // How many search results to show per page.
 const SEARCH_PAGE_SIZE = 30;
+// localStorage key for the "Hide senior roles" search preference.
+const HIDE_SENIOR_KEY = "firehunt.prefs.hideSenior";
 
 // The real cloud and sync-history store for one signed-in user, in the shape the
 // tested sync engine (lib/syncEngine.ts) expects.
@@ -183,6 +186,16 @@ export default function Home() {
   const [sPool, setSPool] = useState<AdzunaJob[]>([]); // whole merged list for All Gulf
   const [sPooled, setSPooled] = useState(false); // true when paging a local pool
   const [sSort, setSSort] = useState<"relevance" | "date">("relevance");
+  // "Hide senior roles" — remembered per browser. The search panel is closed on first
+  // render, so reading storage here can't cause a server/client mismatch.
+  const [hideSenior, setHideSenior] = useState(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(HIDE_SENIOR_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
 
   // Load saved jobs once, when the page first opens (browser only). Reading
   // localStorage has to wait until after mount so the server-rendered HTML and the
@@ -764,7 +777,7 @@ export default function Home() {
         setSPooled(true);
         setSTotal(pool.length);
         setSPage(1);
-        setResults(pool.slice(0, SEARCH_PAGE_SIZE));
+        setResults([]); // the pool is sliced into pages by `searchView` below
       } else {
         // Single source: the server returns one page + a total count.
         setSPooled(false);
@@ -776,6 +789,9 @@ export default function Home() {
     } catch {
       setSearchError("Could not reach the search service.");
       setResults([]);
+      setSTotal(0);
+      setSPool([]);
+      setSPooled(false);
     } finally {
       setSearching(false);
     }
@@ -786,16 +802,37 @@ export default function Home() {
     doSearch(1);
   }
 
-  const searchTotalPages = Math.max(1, Math.ceil(sTotal / SEARCH_PAGE_SIZE));
+  // What the results panel shows once "Hide senior roles" is applied (see
+  // lib/searchView.ts for how pooled and server-paged results differ).
+  const searchView = buildSearchView({
+    pooled: sPooled,
+    pool: sPool,
+    pageResults: results,
+    serverTotal: sTotal,
+    page: sPage,
+    pageSize: SEARCH_PAGE_SIZE,
+    hideSenior,
+  });
 
   function goToSearchPage(n: number) {
-    if (n < 1 || n > searchTotalPages || searching) return;
+    if (n < 1 || n > searchView.totalPages || searching) return;
     if (sPooled) {
       setSPage(n);
-      setResults(sPool.slice((n - 1) * SEARCH_PAGE_SIZE, n * SEARCH_PAGE_SIZE));
     } else {
       doSearch(n);
     }
+  }
+
+  function toggleHideSenior(on: boolean) {
+    setHideSenior(on);
+    try {
+      window.localStorage.setItem(HIDE_SENIOR_KEY, on ? "1" : "0");
+    } catch {
+      // Private mode / storage blocked: the toggle still works for this visit.
+    }
+    // A filtered pool has fewer pages, so go back to the start rather than risk
+    // landing past the end.
+    if (sPooled) setSPage(1);
   }
 
   // Copy a search result into your own board as a new job.
@@ -1184,6 +1221,24 @@ export default function Home() {
               </select>
             </Field>
             <div className="sm:col-span-4">
+              <label className="flex cursor-pointer items-start gap-2 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={hideSenior}
+                  onChange={(e) => toggleHideSenior(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-accent"
+                />
+                <span>
+                  Hide senior roles
+                  <span className="block text-xs text-zinc-500">
+                    Titles with senior, lead, principal, head of, director, VP,
+                    chief… Filters on the title only, so it can miss or catch the
+                    odd role.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div className="sm:col-span-4">
               <button
                 type="submit"
                 disabled={searching}
@@ -1198,11 +1253,11 @@ export default function Home() {
             Gulf countries search via Jooble — pick{" "}
             <strong>🌍 All Gulf countries</strong> to search them all at once;
             Australia, Singapore and Europe via Adzuna. Senior roles tend to
-            cluster on page 1, so browse further pages, try specific titles
-            (e.g. &ldquo;product manager&rdquo;), or set Sort to &ldquo;Newest
-            first&rdquo; on Adzuna to surface more mid-level roles. Jooble has
-            limited free Gulf data, so use the bookmarklet or Add a job for
-            anything it misses.
+            cluster on page 1 — tick <strong>Hide senior roles</strong>, try
+            specific titles (e.g. &ldquo;product manager&rdquo;), or set Sort to
+            &ldquo;Newest first&rdquo; on Adzuna to surface more mid-level roles.
+            Jooble has limited free Gulf data, so use the bookmarklet or Add a
+            job for anything it misses.
           </p>
 
           {searchError && (
@@ -1211,16 +1266,27 @@ export default function Home() {
             </p>
           )}
 
-          {results.length > 0 && (
+          {searchView.hadResults && (
             <p className="mt-4 text-xs text-zinc-400">
-              {sTotal.toLocaleString()} result{sTotal === 1 ? "" : "s"}
+              {searchView.total.toLocaleString()} result{searchView.total === 1 ? "" : "s"}
               {sPooled ? " across the Gulf" : ""} · page {sPage} of{" "}
-              {searchTotalPages}
+              {searchView.totalPages}
+              {searchView.hidden > 0 &&
+                ` · ${searchView.hidden} senior role${searchView.hidden === 1 ? "" : "s"} hidden ${
+                  searchView.hiddenScope === "all" ? "across the Gulf" : "on this page"
+                }`}
             </p>
           )}
-          {results.length > 0 && (
+          {searchView.hadResults && searchView.items.length === 0 && (
+            <p className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-zinc-400">
+              {sPooled
+                ? "Every result looks like a senior role. Untick Hide senior roles to see them, or try different keywords."
+                : "Every role on this page looks senior. Try the next page, or untick Hide senior roles."}
+            </p>
+          )}
+          {searchView.items.length > 0 && (
             <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {results.map((r) => {
+              {searchView.items.map((r) => {
                 const added = imported.has(r.externalId);
                 return (
                   <article
@@ -1275,7 +1341,7 @@ export default function Home() {
             </div>
           )}
 
-          {results.length > 0 && searchTotalPages > 1 && (
+          {searchView.hadResults && searchView.totalPages > 1 && (
             <div className="mt-5 flex items-center justify-center gap-3">
               <button
                 type="button"
@@ -1286,12 +1352,12 @@ export default function Home() {
                 ← Prev
               </button>
               <span className="text-xs text-zinc-400">
-                Page {sPage} of {searchTotalPages}
+                Page {sPage} of {searchView.totalPages}
               </span>
               <button
                 type="button"
                 onClick={() => goToSearchPage(sPage + 1)}
-                disabled={sPage >= searchTotalPages || searching}
+                disabled={sPage >= searchView.totalPages || searching}
                 className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5 disabled:opacity-40"
               >
                 Next →

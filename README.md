@@ -94,7 +94,7 @@ flowchart LR
   API --> WA
 ```
 
-**Offline-first sync.** The browser's own storage stays the source of truth while offline. On sign-in the app pulls the cloud copy, merges in anything that only exists locally (a one-time migration), then pushes each add, edit and delete by diffing against what it last pushed. Conflicts are last-write-wins, which is fine for a single person on a few devices.
+**Offline-first sync.** The browser's own storage stays the source of truth while offline. On sign-in the app pulls the cloud copy and reconciles it with this device. Each device remembers which items it has already synced, so something the cloud lacks is uploaded only if this device has never synced it; otherwise it was deleted on another device and is dropped. (Without that rule, a stale copy on a second device would resurrect deleted jobs; a two-device simulation test covers exactly this.) After that, each add, edit and delete is pushed by diffing against what was last pushed. Conflicts are last-write-wins, which is fine for a single person on a few devices.
 
 ## Security model
 
@@ -161,7 +161,7 @@ The schema is in `supabase/migrations/` and is idempotent. Run `001_init.sql` th
 
 ### Known limitations
 
-- Sync is last-write-wins with no live updates between open devices.
+- Sync is last-write-wins with no live updates between open devices. An edit made while offline can be overwritten by the cloud copy at the next sign-in, and a job deleted while offline can reappear.
 - Live AI is off on the hosted site, and the AI features have so far only been tested with unit tests against a faked network. I haven't run the evals against the real API, so I'm not publishing any accuracy numbers.
 - Scanned PDFs and legacy `.doc` CVs can't be analysed.
 - The free Supabase plan pauses projects after about a week without activity.

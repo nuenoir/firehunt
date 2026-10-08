@@ -22,6 +22,15 @@ import {
   upsertRemoteJobs,
   deleteRemoteJobs,
 } from "@/lib/jobsRemote";
+import {
+  planIsEmpty,
+  planPush,
+  pushChanges,
+  reconcileOnSignIn,
+  type JobCloud,
+  type KnownIdStore,
+} from "@/lib/syncEngine";
+import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
 import CvManager from "@/app/CvManager";
 import InsightsManager from "@/app/InsightsManager";
 import PrepPrompt from "@/app/PrepPrompt";
@@ -72,6 +81,22 @@ const EMPTY_FORM = {
 // How many search results to show per page.
 const SEARCH_PAGE_SIZE = 30;
 
+// The real cloud and sync-history store for one signed-in user, in the shape the
+// tested sync engine (lib/syncEngine.ts) expects.
+function jobCloud(userId: string): JobCloud {
+  return {
+    fetch: fetchRemoteJobs,
+    upsert: (jobs) => upsertRemoteJobs(jobs, userId),
+    remove: deleteRemoteJobs,
+  };
+}
+function knownJobIds(userId: string): KnownIdStore {
+  return {
+    load: () => loadKnownIds("jobs", userId),
+    save: (ids) => saveKnownIds("jobs", userId, ids),
+  };
+}
+
 export default function Home() {
   const [view, setView] = useState<View>("jobs"); // which tab is showing
   const [cvList, setCvList] = useState<CvMeta[]>([]); // CVs available to attach
@@ -81,6 +106,7 @@ export default function Home() {
 
   // --- Cloud sync (Supabase) ---
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
+  const userId = user?.id ?? null; // stable across token refreshes; the user object is not
   const [cloudReady, setCloudReady] = useState(false); // initial pull+merge done
   const [syncStatus, setSyncStatus] = useState<
     "idle" | "syncing" | "synced" | "error"
@@ -221,27 +247,24 @@ export default function Home() {
     };
   }, [user]);
 
-  // On sign-in: pull the user's jobs from the cloud, merge in any local-only
-  // jobs (a one-time migration), then switch the board to the merged set.
+  // On sign-in: pull the user's jobs from the cloud and reconcile them with this
+  // device's copy, then switch the board to the result. The rules (what to upload,
+  // and what to drop because it was deleted on another device) live in
+  // lib/syncMerge.ts and are covered by a two-device simulation test.
   useEffect(() => {
-    if (!supabase || !user || !loaded) return;
+    if (!supabase || !userId || !loaded) return;
     let cancelled = false;
     (async () => {
       setSyncStatus("syncing");
       try {
-        const remote = await fetchRemoteJobs();
+        const result = await reconcileOnSignIn(
+          jobsRef.current,
+          jobCloud(userId),
+          knownJobIds(userId),
+        );
         if (cancelled) return;
-        const local = jobsRef.current;
-        const remoteIds = new Set(remote.map((r) => r.id));
-        const localOnly = local.filter((j) => !remoteIds.has(j.id));
-        if (localOnly.length) await upsertRemoteJobs(localOnly, user.id);
-        const merged = [...remote, ...localOnly].sort((a, b) =>
-          (b.dateAdded || "").localeCompare(a.dateAdded || ""),
-        );
-        lastSyncedRef.current = new Map(
-          merged.map((j) => [j.id, JSON.stringify(j)]),
-        );
-        setJobs(merged);
+        lastSyncedRef.current = result.snapshot;
+        setJobs(result.jobs);
         setCloudReady(true);
         setSyncStatus("synced");
       } catch {
@@ -251,31 +274,29 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [user, loaded]);
+  }, [userId, loaded]);
 
   // While signed in, push local changes to the cloud: upsert new/edited jobs and
   // delete removed ones, diffed against what we last pushed.
   useEffect(() => {
-    if (!supabase || !user || !cloudReady) return;
-    const prev = lastSyncedRef.current;
-    const currentIds = new Set(jobs.map((j) => j.id));
-    const toUpsert = jobs.filter((j) => prev.get(j.id) !== JSON.stringify(j));
-    const toDelete = [...prev.keys()].filter((id) => !currentIds.has(id));
-    if (toUpsert.length === 0 && toDelete.length === 0) return;
+    if (!supabase || !userId || !cloudReady) return;
+    const plan = planPush(jobs, lastSyncedRef.current);
+    if (planIsEmpty(plan)) return;
     setSyncStatus("syncing");
     (async () => {
       try {
-        await upsertRemoteJobs(toUpsert, user.id);
-        await deleteRemoteJobs(toDelete);
-        lastSyncedRef.current = new Map(
-          jobs.map((j) => [j.id, JSON.stringify(j)]),
+        lastSyncedRef.current = await pushChanges(
+          jobs,
+          plan,
+          jobCloud(userId),
+          knownJobIds(userId),
         );
         setSyncStatus("synced");
       } catch {
         setSyncStatus("error");
       }
     })();
-  }, [jobs, user, cloudReady]);
+  }, [jobs, userId, cloudReady]);
 
   // Email a magic sign-in link (no password to manage).
   async function sendMagicLink(e: React.FormEvent) {

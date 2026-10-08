@@ -22,6 +22,8 @@ import {
   type CvRecord,
 } from "@/lib/cvStore";
 import { supabase } from "@/lib/supabase";
+import { reconcileCvs } from "@/lib/syncMerge";
+import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
 import {
   cvStoragePath,
   deleteRemoteCv,
@@ -42,6 +44,17 @@ interface CvItem {
   dateAdded: string;
   path?: string; // cloud storage path, when synced
   hasLocalBlob: boolean; // whether the file is in THIS browser
+}
+
+/** Record (or forget) that this device has synced a CV with the cloud, so a copy
+ *  deleted on another device isn't mistaken for a new upload later. If there is no
+ *  history yet, the next load builds it from scratch. */
+function rememberCv(userId: string, id: string, synced: boolean) {
+  const known = loadKnownIds("cvs", userId);
+  if (known === null) return;
+  if (synced) known.add(id);
+  else known.delete(id);
+  saveKnownIds("cvs", userId, known);
 }
 
 export default function CvManager() {
@@ -78,9 +91,23 @@ export default function CvManager() {
 
         if (supabase && user) {
           const remote = await fetchRemoteCvs();
-          const remoteById = new Map(remote.map((r) => [r.id, r]));
-          const localOnly = local.filter((c) => !remoteById.has(c.id));
-          // Migrate local-only CVs to the cloud.
+          // Decide what is new here (upload) and what was deleted on another
+          // device (remove the stale local copy) — see lib/syncMerge.ts.
+          const plan = reconcileCvs(
+            local.map((c) => c.id),
+            remote.map((r) => r.id),
+            loadKnownIds("cvs", user.id),
+          );
+          const toUpload = new Set(plan.uploadIds);
+          for (const id of plan.dropLocalIds) {
+            try {
+              await deleteCv(id);
+            } catch {
+              /* a stale copy that can't be removed is harmless */
+            }
+          }
+          const localOnly = local.filter((c) => toUpload.has(c.id));
+          const uploaded: string[] = [];
           for (const c of localOnly) {
             try {
               await uploadRemoteCv({
@@ -93,10 +120,13 @@ export default function CvManager() {
                 dateAdded: c.dateAdded,
                 blob: c.blob,
               });
+              uploaded.push(c.id);
             } catch {
-              /* keep going; it stays available locally */
+              /* keep going; it stays available locally and retries next time */
             }
           }
+          // Remember what is now in sync (failed uploads are left out to retry).
+          saveKnownIds("cvs", user.id, [...remote.map((r) => r.id), ...uploaded]);
           const map = new Map<string, CvItem>();
           for (const r of remote) {
             map.set(r.id, {
@@ -187,6 +217,7 @@ export default function CvManager() {
           dateAdded: record.dateAdded,
           blob: file,
         });
+        rememberCv(user.id, record.id, true);
       }
       const item: CvItem = {
         id: record.id,
@@ -226,7 +257,10 @@ export default function CvManager() {
   async function remove(item: CvItem) {
     try {
       if (item.hasLocalBlob) await deleteCv(item.id);
-      if (supabase && user && item.path) await deleteRemoteCv(item.id, item.path);
+      if (supabase && user && item.path) {
+        await deleteRemoteCv(item.id, item.path);
+        rememberCv(user.id, item.id, false);
+      }
       setItems((prev) => prev.filter((c) => c.id !== item.id));
     } catch {
       setError("Could not delete the CV.");

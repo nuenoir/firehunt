@@ -22,6 +22,7 @@ import {
   type CvRecord,
 } from "@/lib/cvStore";
 import { supabase } from "@/lib/supabase";
+import { ensureLocalDataOwner } from "@/lib/localData";
 import { reconcileCvs } from "@/lib/syncMerge";
 import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
 import {
@@ -79,6 +80,14 @@ export default function CvManager() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
+  // When this browser's data is cleared (signing out, or switching accounts), drop
+  // whatever the list is still showing.
+  useEffect(() => {
+    const clear = () => setItems([]);
+    window.addEventListener("firehunt:wiped", clear);
+    return () => window.removeEventListener("firehunt:wiped", clear);
+  }, []);
+
   // Load CVs: local ones always; when signed in, merge the cloud list and
   // migrate any local-only CVs up (a one-time upload).
   useEffect(() => {
@@ -86,6 +95,9 @@ export default function CvManager() {
     (async () => {
       setLoaded(false);
       try {
+        // Wait for the shared ownership check (the same one the jobs sync waits for)
+        // so another account's CV files are cleared before they can be uploaded.
+        if (supabase && user) await ensureLocalDataOwner(user.id);
         const local = await getAllCvs();
         const localById = new Map(local.map((c) => [c.id, c]));
 

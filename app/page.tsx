@@ -31,6 +31,12 @@ import {
   type KnownIdStore,
 } from "@/lib/syncEngine";
 import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
+import {
+  ensureLocalDataOwner,
+  readLocalOwner,
+  wipeLocalAccountData,
+} from "@/lib/localData";
+import { shouldWipeOnSignOut } from "@/lib/localOwnership";
 import CvManager from "@/app/CvManager";
 import InsightsManager from "@/app/InsightsManager";
 import PrepPrompt from "@/app/PrepPrompt";
@@ -107,6 +113,7 @@ export default function Home() {
   // --- Cloud sync (Supabase) ---
   const [user, setUser] = useState<{ id: string; email: string } | null>(null);
   const userId = user?.id ?? null; // stable across token refreshes; the user object is not
+  const signedInRef = useRef(false); // was this tab signed in? (read by the auth listener)
   const [cloudReady, setCloudReady] = useState(false); // initial pull+merge done
   const [syncStatus, setSyncStatus] = useState<
     "idle" | "syncing" | "synced" | "error"
@@ -144,6 +151,9 @@ export default function Home() {
   useEffect(() => {
     jobsRef.current = jobs;
   }, [jobs]);
+  useEffect(() => {
+    signedInRef.current = userId !== null;
+  }, [userId]);
   useEffect(() => {
     captureRef.current = capture;
   }, [capture]);
@@ -209,7 +219,7 @@ export default function Home() {
       const u = data.session?.user;
       if (u) setUser({ id: u.id, email: u.email ?? "" });
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
       const u = session?.user;
       if (u) {
         setUser({ id: u.id, email: u.email ?? "" });
@@ -219,6 +229,22 @@ export default function Home() {
         setCloudReady(false);
         lastSyncedRef.current = new Map();
         setSyncStatus("idle");
+        // Signing out removes this account's data from the browser (it stays safe in
+        // the cloud), so the next person on a shared computer doesn't see it. Only a
+        // real SIGNED_OUT counts: the "no session" event a signed-out visitor gets on
+        // every page load must never clear their work.
+        // A tab that was signed in also drops what it is showing: when another tab
+        // signs out first, the owner marker is already gone by the time this runs.
+        if (event === "SIGNED_OUT") {
+          const hadAccountData =
+            signedInRef.current || shouldWipeOnSignOut(readLocalOwner());
+          signedInRef.current = false;
+          if (hadAccountData) {
+            wipeLocalAccountData()
+              .catch(() => {})
+              .finally(() => setJobs([]));
+          }
+        }
       }
     });
     return () => sub.subscription.unsubscribe();
@@ -256,6 +282,23 @@ export default function Home() {
     let cancelled = false;
     (async () => {
       setSyncStatus("syncing");
+      // Before anything can sync: if this browser still holds a DIFFERENT account's
+      // data, clear it so it can't be uploaded into this one (lib/localData.ts).
+      let wiped = false;
+      try {
+        wiped = (await ensureLocalDataOwner(userId)).wiped;
+      } catch {
+        if (!cancelled) {
+          setJobs([]); // fail closed: never show or sync the other account's jobs
+          setSyncStatus("error");
+        }
+        return;
+      }
+      if (cancelled) return;
+      if (wiped) {
+        jobsRef.current = [];
+        setJobs([]);
+      }
       try {
         const result = await reconcileOnSignIn(
           jobsRef.current,
@@ -314,9 +357,37 @@ export default function Home() {
     );
   }
 
+  // What on this device hasn't reached the cloud yet. Signing out clears this
+  // browser's copy, so anything not synced would be lost.
+  async function countUnsynced(): Promise<{ jobs: number; cvs: number }> {
+    const jobs = cloudReady
+      ? planPush(jobsRef.current, lastSyncedRef.current).toUpsert.length
+      : jobsRef.current.length; // sync never completed, so nothing is verified
+    let cvs = 0;
+    try {
+      const [local, remote] = await Promise.all([getAllCvs(), fetchRemoteCvs()]);
+      const inCloud = new Set(remote.map((r) => r.id));
+      cvs = local.filter((c) => !inCloud.has(c.id)).length;
+    } catch {
+      cvs = (await getAllCvs().catch(() => [])).length; // can't verify: count them all
+    }
+    return { jobs, cvs };
+  }
+
   async function signOut() {
     if (!supabase) return;
-    await supabase.auth.signOut();
+    const pending = await countUnsynced();
+    if (pending.jobs + pending.cvs > 0) {
+      const parts = [
+        pending.jobs ? `${pending.jobs} job${pending.jobs === 1 ? "" : "s"}` : "",
+        pending.cvs ? `${pending.cvs} CV${pending.cvs === 1 ? "" : "s"}` : "",
+      ].filter(Boolean);
+      const proceed = window.confirm(
+        `${parts.join(" and ")} on this device haven't synced to your account yet and would be lost if you sign out. Sign out anyway?`,
+      );
+      if (!proceed) return;
+    }
+    await supabase.auth.signOut(); // the listener above then clears this browser's copy
     setEmail("");
     setAuthMsg("");
   }
@@ -842,6 +913,7 @@ export default function Home() {
                 )}
                 <button
                   onClick={signOut}
+                  title="Sign out and remove your data from this browser (it stays safe in your account)"
                   className="rounded-lg border border-white/15 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:bg-white/5"
                 >
                   Sign out

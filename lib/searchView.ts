@@ -11,6 +11,7 @@
 //     and we report how many were hidden on this page.
 
 import { isSeniorTitle } from "./seniority";
+import { LIMITS } from "./limits";
 
 interface Titled {
   title: string;
@@ -61,7 +62,13 @@ export function buildSearchView<T extends Titled>(opts: {
   return {
     items,
     total: opts.serverTotal,
-    totalPages: Math.max(1, Math.ceil(opts.serverTotal / opts.pageSize)),
+    // The search endpoints refuse any page deeper than LIMITS.search.maxPage, so never
+    // offer one: a broad search can report thousands of results, and a "Next" button
+    // that leads to an error would look like a bug.
+    totalPages: Math.min(
+      LIMITS.search.maxPage,
+      Math.max(1, Math.ceil(opts.serverTotal / opts.pageSize)),
+    ),
     hidden: opts.pageResults.length - items.length,
     hiddenScope: "page",
     hadResults: opts.pageResults.length > 0,

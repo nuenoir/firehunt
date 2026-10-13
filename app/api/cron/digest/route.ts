@@ -7,13 +7,14 @@
 // people may have signed up since.
 
 import { getAdminClient } from "@/lib/server/admin";
+import { secretsMatch } from "@/lib/server/secret";
 import { resolveOwnerId } from "@/lib/server/owner";
 import { sendWhatsApp, summarizeJobs, type JobSummaryRow } from "@/lib/notify";
 
 export async function GET(request: Request) {
   // Only Vercel Cron (or someone with the secret) may trigger this.
   const secret = process.env.CRON_SECRET;
-  if (!secret || request.headers.get("authorization") !== `Bearer ${secret}`) {
+  if (!secret || !secretsMatch(request.headers.get("authorization") ?? "", `Bearer ${secret}`)) {
     return Response.json({ error: "Unauthorized" }, { status: 401 });
   }
 

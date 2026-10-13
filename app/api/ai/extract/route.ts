@@ -9,6 +9,8 @@ import { getAdminClient } from "@/lib/server/admin";
 import { consumeAiQuota } from "@/lib/server/aiQuota";
 import { tooManyRequests } from "@/lib/server/rateLimit";
 import { AI_NOT_ENABLED, llmErrorResponse } from "@/lib/server/aiHttp";
+import { readJsonLimited } from "@/lib/server/body";
+import { LIMITS } from "@/lib/limits";
 import { callClaude } from "@/lib/ai/llm";
 import { runExtraction } from "@/lib/ai/service";
 import { MAX_CAPTURE_CHARS, getModels } from "@/lib/ai/config";
@@ -32,9 +34,11 @@ export async function POST(request: Request) {
     return Response.json(AI_NOT_ENABLED, { status: 503 });
   }
 
+  const raw = await readJsonLimited(request, LIMITS.aiRequestBytes);
+  if (!raw.ok) return Response.json({ error: raw.error }, { status: raw.status });
   let body: z.infer<typeof BodySchema>;
   try {
-    body = BodySchema.parse(await request.json());
+    body = BodySchema.parse(raw.data);
   } catch {
     return Response.json({ error: "Invalid request." }, { status: 400 });
   }

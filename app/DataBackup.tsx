@@ -8,6 +8,7 @@ import { useRef, useState } from "react";
 import { JOBS_STORAGE_KEY } from "@/lib/jobs";
 import { INSIGHTS_STORAGE_KEY } from "@/lib/insights";
 import { clearAllCvs, getAllCvs, saveCv, type CvRecord } from "@/lib/cvStore";
+import { normalizeImportedCv, normalizeImportedJobs } from "@/lib/limitGuards";
 
 // Read a file (CV) into a base64 text form so it can live inside JSON.
 function blobToDataUrl(blob: Blob): Promise<string> {
@@ -84,24 +85,47 @@ export default function DataBackup() {
         setBusy(false);
         return;
       }
-      localStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(data.jobs ?? []));
+      // A backup can be hand-edited or damaged, and cloud sync later rejects a whole
+      // upload if any one job breaks a limit — so check and trim the jobs on the way in.
+      const nowIso = new Date().toISOString();
+      const { jobs, skipped: skippedJobs } = normalizeImportedJobs(data.jobs, nowIso);
+      localStorage.setItem(JOBS_STORAGE_KEY, JSON.stringify(jobs));
       localStorage.setItem(
         INSIGHTS_STORAGE_KEY,
         JSON.stringify(data.insights ?? []),
       );
       await clearAllCvs();
-      for (const c of data.cvs ?? []) {
-        const blob = await (await fetch(c.dataUrl)).blob();
-        const record: CvRecord = {
-          id: c.id,
-          name: c.name,
-          role: c.role,
-          type: c.type,
-          size: c.size,
-          dateAdded: c.dateAdded,
-          blob,
-        };
-        await saveCv(record);
+      // CVs are always kept on this device, even ones too big or the wrong type for
+      // the cloud (those just don't sync). An unreadable entry is skipped, not fatal.
+      let skippedCvs = 0;
+      for (const raw of Array.isArray(data.cvs) ? data.cvs : []) {
+        try {
+          const c = normalizeImportedCv(raw, nowIso);
+          if (!c) {
+            skippedCvs++;
+            continue;
+          }
+          const blob = await (await fetch(c.dataUrl)).blob();
+          const record: CvRecord = {
+            id: c.id,
+            name: c.name,
+            role: c.role,
+            type: c.type,
+            size: c.size,
+            dateAdded: c.dateAdded,
+            blob,
+          };
+          await saveCv(record);
+        } catch {
+          skippedCvs++;
+        }
+      }
+      const skipped = skippedJobs + skippedCvs;
+      if (skipped > 0) {
+        // The page reloads right after this, so a status line would vanish unseen.
+        window.alert(
+          `Restored your backup, but ${skipped} item${skipped === 1 ? " in the file was" : "s in the file were"} damaged and had to be skipped.`,
+        );
       }
       // Reload so every tab re-reads the restored data.
       window.location.reload();

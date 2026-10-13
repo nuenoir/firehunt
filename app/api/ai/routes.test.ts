@@ -18,6 +18,7 @@ vi.mock("@/lib/server/aiQuota", () => ({ consumeAiQuota: mocks.consumeAiQuota })
 vi.mock("@/lib/cvText", () => ({ extractCvText: mocks.extractCvText }));
 vi.mock("@/lib/ai/llm", () => ({ callClaude: mocks.callClaude }));
 
+import { LIMITS } from "@/lib/limits";
 import { POST as analyze } from "./analyze/route";
 import { POST as extract } from "./extract/route";
 
@@ -94,6 +95,25 @@ describe("POST /api/ai/analyze", () => {
     expect((await analyze(post({ ...analyzeBody, cvId: "not-a-uuid" }))).status).toBe(400);
   });
 
+  it("refuses an enormous request body with 413 before parsing it or touching anything", async () => {
+    const huge = JSON.stringify({ ...analyzeBody, description: "x".repeat(LIMITS.aiRequestBytes + 1) });
+    const res = await analyze(post(huge));
+    expect(res.status).toBe(413);
+    expect(mocks.extractCvText).not.toHaveBeenCalled();
+    expect(mocks.consumeAiQuota).not.toHaveBeenCalled();
+    expect(mocks.callClaude).not.toHaveBeenCalled();
+  });
+
+  it("accepts a title and company as long as the database stores them", async () => {
+    const long = "t".repeat(LIMITS.job.title); // 500: used to be refused above 300
+    // A too-short description stops the request right after validation (422), so a 422
+    // here means the long title and company PASSED validation; 400 would mean they did not.
+    const short = { ...analyzeBody, description: "short" };
+    expect((await analyze(post({ ...short, title: long, company: long }))).status).toBe(422);
+    expect((await analyze(post({ ...short, title: long + "t" }))).status).toBe(400);
+    expect((await analyze(post({ ...short, company: long + "t" }))).status).toBe(400);
+  });
+
   it("asks for the job description when the notes are too short, without spending quota", async () => {
     const res = await analyze(post({ ...analyzeBody, description: "short" }));
     expect(res.status).toBe(422);
@@ -115,6 +135,53 @@ describe("POST /api/ai/analyze", () => {
   it("returns 404 when the CV file cannot be downloaded", async () => {
     mocks.authenticate.mockResolvedValue(signedIn({ file: null }));
     expect((await analyze(post(analyzeBody))).status).toBe(404);
+  });
+
+  describe("CV file size", () => {
+    /** A real Blob of the given length, with its arrayBuffer() watched so a test can
+     *  tell whether the route ever read the bytes. */
+    function fileOfSize(bytes: number) {
+      const file = new Blob([new Uint8Array(bytes)]);
+      const read = vi.spyOn(file, "arrayBuffer");
+      return { file, read };
+    }
+
+    it("rejects a CV file over the limit with 413, before parsing it or spending quota", async () => {
+      const { file, read } = fileOfSize(LIMITS.cvFileBytes + 1);
+      // The row's own "size" column is written by the browser, so it must not be believed.
+      mocks.authenticate.mockResolvedValue(
+        signedIn({ file, cvRow: { name: "alex.pdf", type: "application/pdf", size: 1_000 } }),
+      );
+
+      const res = await analyze(post(analyzeBody));
+
+      expect(res.status).toBe(413);
+      const { error } = await res.json();
+      expect(error).toContain("5.0 MB"); // the limit, in words a person can read
+      expect(read).not.toHaveBeenCalled();
+      expect(mocks.extractCvText).not.toHaveBeenCalled();
+      expect(mocks.consumeAiQuota).not.toHaveBeenCalled();
+      expect(mocks.callClaude).not.toHaveBeenCalled();
+    });
+
+    it("names the real size of an oversize file", async () => {
+      const { file } = fileOfSize(7 * 1024 * 1024);
+      mocks.authenticate.mockResolvedValue(signedIn({ file }));
+      const { error } = await (await analyze(post(analyzeBody))).json();
+      expect(error).toContain("7.0 MB");
+    });
+
+    it("still accepts a CV file of exactly the limit", async () => {
+      const { file, read } = fileOfSize(LIMITS.cvFileBytes);
+      mocks.authenticate.mockResolvedValue(signedIn({ file }));
+      mocks.callClaude.mockResolvedValue({ ok: false, code: "refused", message: "declined" });
+
+      const res = await analyze(post(analyzeBody));
+
+      expect(res.status).not.toBe(413);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(mocks.extractCvText).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("returns 422 with the reason when the CV cannot be read, without spending quota", async () => {
@@ -191,6 +258,14 @@ describe("POST /api/ai/extract", () => {
   it("returns 503 when AI is not configured", async () => {
     vi.stubEnv("ANTHROPIC_API_KEY", "");
     expect((await extract(post(extractBody))).status).toBe(503);
+  });
+
+  it("refuses an enormous request body with 413 before spending anything", async () => {
+    const huge = JSON.stringify({ ...extractBody, text: "x".repeat(LIMITS.aiRequestBytes + 1) });
+    const res = await extract(post(huge));
+    expect(res.status).toBe(413);
+    expect(mocks.consumeAiQuota).not.toHaveBeenCalled();
+    expect(mocks.callClaude).not.toHaveBeenCalled();
   });
 
   it("rejects oversized captures and near-empty captures", async () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildSearchView } from "./searchView";
+import { LIMITS } from "./limits";
 
 const mk = (title: string) => ({ title });
 const SENIOR = ["Senior Analyst", "Director of X", "Head of Y", "Principal Z", "VP Sales"];
@@ -58,9 +59,30 @@ describe("buildSearchView — server-paged (Adzuna / one country)", () => {
     const v = buildSearchView({ pooled: false, pool: [], pageResults, serverTotal: 4514, page: 2, pageSize: 30, hideSenior: true });
     expect(v.items.map((j) => j.title)).toEqual(MID);
     expect(v.total).toBe(4514);
-    expect(v.totalPages).toBe(Math.ceil(4514 / 30));
+    // 4514 results would be 151 pages, but the search endpoints stop at maxPage.
+    expect(v.totalPages).toBe(LIMITS.search.maxPage);
     expect(v.hidden).toBe(5);
     expect(v.hiddenScope).toBe("page");
+  });
+
+  it("never offers a page the search endpoints would refuse", () => {
+    const view = (serverTotal: number) =>
+      buildSearchView({ pooled: false, pool: [], pageResults, serverTotal, page: 1, pageSize: 30, hideSenior: false });
+    const lastAllowed = LIMITS.search.maxPage * 30;
+    // Exactly the last allowed page: not cut.
+    expect(view(lastAllowed).totalPages).toBe(LIMITS.search.maxPage);
+    // One result more would need page 51: held at the cap.
+    expect(view(lastAllowed + 1).totalPages).toBe(LIMITS.search.maxPage);
+    // Just under: untouched by the cap.
+    expect(view(lastAllowed - 30).totalPages).toBe(LIMITS.search.maxPage - 1);
+    // A small search keeps its natural page count.
+    expect(view(95).totalPages).toBe(4);
+  });
+
+  it("does not cap a pooled (All Gulf) search, which pages locally and never asks the server", () => {
+    const pool = Array.from({ length: 60 * 30 }, (_, i) => mk(`Analyst ${i}`));
+    const v = buildSearchView({ pooled: true, pool, pageResults: [], serverTotal: 0, page: 1, pageSize: 30, hideSenior: false });
+    expect(v.totalPages).toBe(60);
   });
 
   it("changes nothing when the filter is off", () => {

@@ -32,6 +32,12 @@ import {
   type KnownIdStore,
 } from "@/lib/syncEngine";
 import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
+import { LIMITS } from "@/lib/limits";
+import {
+  clampJobForCloud,
+  clampText,
+  describeLimitError,
+} from "@/lib/limitGuards";
 import {
   ensureLocalDataOwner,
   readLocalOwner,
@@ -121,6 +127,9 @@ export default function Home() {
   const [syncStatus, setSyncStatus] = useState<
     "idle" | "syncing" | "synced" | "error"
   >("idle");
+  // Why the last sync failed, in plain words, when the cloud turned us away because
+  // of a storage limit ("" = no specific reason known).
+  const [syncDetail, setSyncDetail] = useState("");
   const [email, setEmail] = useState(""); // sign-in email field
   const [authMsg, setAuthMsg] = useState(""); // feedback under the sign-in form
   const [notifying, setNotifying] = useState(false); // WhatsApp summary in flight
@@ -242,6 +251,7 @@ export default function Home() {
         setCloudReady(false);
         lastSyncedRef.current = new Map();
         setSyncStatus("idle");
+        setSyncDetail("");
         // Signing out removes this account's data from the browser (it stays safe in
         // the cloud), so the next person on a shared computer doesn't see it. Only a
         // real SIGNED_OUT counts: the "no session" event a signed-out visitor gets on
@@ -322,9 +332,19 @@ export default function Home() {
         lastSyncedRef.current = result.snapshot;
         setJobs(result.jobs);
         setCloudReady(true);
-        setSyncStatus("synced");
-      } catch {
-        if (!cancelled) setSyncStatus("error");
+        if (result.uploadError !== undefined) {
+          // The cloud jobs are shown; this device's own jobs could not go up yet.
+          setSyncStatus("error");
+          setSyncDetail(describeLimitError(result.uploadError, "job") ?? "");
+        } else {
+          setSyncStatus("synced");
+          setSyncDetail("");
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setSyncStatus("error");
+          setSyncDetail(describeLimitError(err, "job") ?? "");
+        }
       }
     })();
     return () => {
@@ -348,8 +368,10 @@ export default function Home() {
           knownJobIds(userId),
         );
         setSyncStatus("synced");
-      } catch {
+        setSyncDetail("");
+      } catch (err) {
         setSyncStatus("error");
+        setSyncDetail(describeLimitError(err, "job") ?? "");
       }
     })();
   }, [jobs, userId, cloudReady]);
@@ -483,12 +505,17 @@ export default function Home() {
     const title = params.get("fh_title");
     const url = params.get("fh_url");
     if (!title && !url) return;
+    // The link in the address bar can be as long as anyone likes, so cut each value
+    // to what a job may hold (the form's own limits only apply to typing).
     const captured: CapturePayload = {
-      title: title ?? "",
-      company: params.get("fh_company") ?? "",
-      url: url ?? "",
-      salary: params.get("fh_salary") ?? "",
-      text: cleanCapturedNotes(params.get("fh_notes") ?? ""),
+      title: clampText(title, LIMITS.job.title),
+      company: clampText(params.get("fh_company"), LIMITS.job.company),
+      url: clampText(url, LIMITS.job.url),
+      salary: clampText(params.get("fh_salary"), LIMITS.job.salary),
+      text: clampText(
+        cleanCapturedNotes(params.get("fh_notes") ?? ""),
+        LIMITS.job.notes,
+      ),
     };
     setForm({
       ...EMPTY_FORM,
@@ -593,7 +620,9 @@ export default function Home() {
   function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     if (!form.title.trim() || !form.company.trim()) return; // both required
-    const job: Job = {
+    // Typing is limited by the form, but values filled in by the AI cleanup are not,
+    // so trim here too: what is saved is then always something the cloud accepts.
+    const job: Job = clampJobForCloud({
       id: crypto.randomUUID(),
       title: form.title.trim(),
       company: form.company.trim(),
@@ -606,7 +635,7 @@ export default function Home() {
       deadline: form.deadline || undefined,
       followUpDate: form.followUpDate || undefined,
       contacts: formContactsAi ?? undefined,
-    };
+    });
     setJobs((prev) => [job, ...prev]);
     resetForm();
     setShowForm(false);
@@ -847,7 +876,8 @@ export default function Home() {
 
   function importAdzunaJob(a: AdzunaJob) {
     const countryLabel = currentTargetLabel();
-    const job: Job = {
+    // Search results come from outside, so cut them to what a job may hold.
+    const job: Job = clampJobForCloud({
       id: crypto.randomUUID(),
       title: a.title,
       company: a.company,
@@ -857,7 +887,7 @@ export default function Home() {
       status: "interested",
       notes: a.location ? `Location: ${a.location}` : "",
       dateAdded: new Date().toISOString(),
-    };
+    });
     setJobs((prev) => [job, ...prev]);
     setImported((prev) => new Set(prev).add(a.externalId));
   }
@@ -930,7 +960,7 @@ export default function Home() {
                   {syncStatus === "syncing"
                     ? "· saving…"
                     : syncStatus === "error"
-                      ? "· ⚠ sync error"
+                      ? `· ⚠ ${syncDetail || "sync error"}`
                       : "· up to date"}
                 </span>
               </span>
@@ -1042,6 +1072,7 @@ export default function Home() {
             <input
               className={inputClass}
               value={form.title}
+              maxLength={LIMITS.job.title}
               onChange={(e) => setField("title", e.target.value)}
               placeholder="e.g. Management Consultant"
             />
@@ -1050,6 +1081,7 @@ export default function Home() {
             <input
               className={inputClass}
               value={form.company}
+              maxLength={LIMITS.job.company}
               onChange={(e) => setField("company", e.target.value)}
               placeholder="e.g. McKinsey & Company"
             />
@@ -1085,6 +1117,7 @@ export default function Home() {
               className={inputClass}
               type="url"
               value={form.url}
+              maxLength={LIMITS.job.url}
               onChange={(e) => setField("url", e.target.value)}
               placeholder="https://…"
             />
@@ -1093,6 +1126,7 @@ export default function Home() {
             <input
               className={inputClass}
               value={form.salary}
+              maxLength={LIMITS.job.salary}
               onChange={(e) => setField("salary", e.target.value)}
               placeholder="e.g. AED 30,000/mo"
             />
@@ -1134,6 +1168,7 @@ export default function Home() {
                 className={inputClass}
                 rows={12}
                 value={form.notes}
+                maxLength={LIMITS.job.notes}
                 onChange={(e) => setField("notes", e.target.value)}
                 placeholder="Referral contact, deadline, why you want it…"
               />
@@ -1172,6 +1207,7 @@ export default function Home() {
                 <input
                   className={inputClass}
                   value={sWhat}
+                  maxLength={LIMITS.search.text}
                   onChange={(e) => setSWhat(e.target.value)}
                   placeholder="e.g. data analyst, consultant"
                 />
@@ -1204,6 +1240,7 @@ export default function Home() {
               <input
                 className={inputClass}
                 value={sWhere}
+                maxLength={LIMITS.search.text}
                 onChange={(e) => setSWhere(e.target.value)}
                 placeholder="e.g. Amsterdam"
               />

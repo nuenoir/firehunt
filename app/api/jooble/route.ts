@@ -12,6 +12,7 @@
 import { mapJoobleResults, GULF_LOCATIONS } from "@/lib/jooble";
 import type { AdzunaJob } from "@/lib/adzuna";
 import { enforceSearchLimits } from "@/lib/server/searchLimits";
+import { ALL_GULF, parseJoobleSearch } from "@/lib/server/searchParams";
 
 async function fetchJooble(
   key: string,
@@ -34,10 +35,18 @@ async function fetchJooble(
 }
 
 export async function GET(request: Request) {
+  // Check the query string FIRST: this endpoint is public, so only a known Gulf
+  // location, a plain page number and bounded keywords may go on to Jooble. Doing it
+  // before the rate limiter also means junk costs no database round-trip.
+  const search = parseJoobleSearch(new URL(request.url).searchParams);
+  if (!search.ok) {
+    return Response.json({ error: search.error }, { status: search.status });
+  }
+  const { what, location, page } = search;
+
   // Protect the shared Jooble quota (per visitor and site-wide). "All Gulf" fans
   // out to one upstream call per country, so it costs that many site-wide units.
-  const isAllGulf =
-    new URL(request.url).searchParams.get("location") === "ALL_GULF";
+  const isAllGulf = location === ALL_GULF;
   const limited = await enforceSearchLimits(
     request,
     "jooble",
@@ -57,14 +66,9 @@ export async function GET(request: Request) {
     );
   }
 
-  const { searchParams } = new URL(request.url);
-  const what = searchParams.get("what")?.trim() || "";
-  const location = searchParams.get("location")?.trim() || "";
-  const page = searchParams.get("page") || "1";
-
   try {
     // "All Gulf": query every GCC country at once, merge and de-duplicate.
-    if (location === "ALL_GULF") {
+    if (isAllGulf) {
       const settled = await Promise.allSettled(
         GULF_LOCATIONS.map((g) => fetchJooble(key, what, g.location, "1")),
       );

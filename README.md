@@ -31,7 +31,7 @@ Applying across several countries means tracking dozens of roles from different 
 ## What it does
 
 - **Kanban pipeline** (Interested → Applied → Interview → Offer → Rejected) with filters, notes, deadlines and follow-up dates, colour-coded by urgency.
-- **Job search** across two commercial APIs: Adzuna (Australia, Singapore, the Netherlands, Western Europe) and Jooble (the six Gulf states, with an "All Gulf" option that searches them in parallel and de-duplicates). 30 results per page.
+- **Job search** across two commercial APIs: Adzuna (Australia, Singapore, the Netherlands, Western Europe) and Jooble (the six Gulf states, with an "All Gulf" option that searches them in parallel and de-duplicates). 30 results per page, with an optional **Hide senior roles** filter (a title-keyword check that drops senior, lead, principal, director, VP and similar titles).
 - **One-click capture** from any job page with a bookmarklet. It reads `JobPosting` structured data when a site provides it, and has special handling for LinkedIn, which exposes almost nothing to scripts.
 - **Recruiter contacts** pulled out of the posting, shown as click-to-copy chips with the person's name when the text makes it clear.
 - **CV manager**: upload PDF or Word CVs, tag them by role, attach one to each job.
@@ -102,6 +102,8 @@ flowchart LR
 - **CV files** live in a private bucket under `{user-id}/{cv-id}`; storage policies restrict each user to their own folder. The AI route reads a CV through the caller's own session, so it can't be pointed at someone else's file.
 - **Secrets stay on the server.** Third-party API keys and the Supabase service key are plain (non-`NEXT_PUBLIC_`) environment variables used only in route handlers.
 - **Owner-only WhatsApp.** Anyone can sign in, but the daily digest and the "WhatsApp me a summary" button only work for the owner's account, because they message the owner's phone. The digest filters to the owner explicitly, since the service key bypasses row-level security.
+- **Storage limits, enforced by the database.** Anyone can sign in and the browser talks to Supabase directly, so row-level security alone would let a stranger fill the free tier and take the app down for everyone. Migration `003_limits.sql` makes the database itself refuse that: per-account caps (300 jobs, 10 CVs, 20 stored files), length limits on every text field, and a CV bucket limited to 5 MB and PDF/Word files. A CV's file can only be stored for a CV record that already exists, so the record cap also caps the files. They hold even for someone who skips the app and calls Supabase directly. The app mirrors the same numbers (`lib/limits.ts`) so an honest user is stopped with a clear message rather than a failed sync.
+- **Strict inputs on the public endpoints.** The job-search routes validate country, page, sort and keyword length before anything is sent to Adzuna or Jooble, and the CV analyser checks a file's real size before parsing it.
 - **Rate limiting.** Search routes are limited per visitor (12 a minute) and site-wide per provider, because the job APIs rate-limit the shared key and one visitor could otherwise lock everyone out; AI calls are limited per user and globally. The limiter is a small Postgres function callable only with the service key.
 - **The cron endpoint** requires a bearer secret.
 
@@ -121,6 +123,7 @@ npm run eval -- --yes   # runs the AI eval cases against the real Claude API (co
 
 - **Unit tests** cover the parsing and safety logic: contact extraction, the bookmarklet run against mock LinkedIn and structured-data pages, date and stats maths, the sync mapping, rate limiting, the AI spend cap, owner resolution, the grounding checks, prompt fencing, CV extraction from real generated PDF and Word files, and the API routes. The Anthropic SDK itself is exercised against a fake network, so the exact request sent to Claude and every failure mode are checked without a key.
 - **Evals** (`evals/`) run the real prompts against fixed, fully synthetic cases: a strong, a partial and a weak fit (which must score in that order with real margins), a posting that tries to inject instructions, and extraction cases including "nothing to invent" traps. The scorers are themselves unit-tested. The harness refuses to spend money without `--yes`. I haven't published eval results yet because they need a funded API key.
+- **The database limits are tested on a real Postgres.** The migrations are applied, unchanged, to an in-memory Postgres (PGlite) with stand-ins for Supabase's auth and storage, and the tests try to break each limit: the exact boundary of every field, the account caps (including editing existing rows while at the cap), the file-count policy, rows that were already oversize before the migration, and one account trying to reach another's rows. A second test feeds adversarial jobs through the app's client-side clamps and checks the database accepts every one, so the two layers can't drift apart.
 - **CI** runs lint, typecheck, tests and a production build on every push.
 
 ## Running locally
@@ -150,7 +153,14 @@ Everything works without keys except the features that need them: search needs t
 
 ### Database
 
-The schema is in `supabase/migrations/` and is idempotent. Run `001_init.sql` then `002_ai_and_rate_limits.sql` in the Supabase SQL editor (Primary Database).
+The schema is in `supabase/migrations/` and is idempotent. Run `001_init.sql`, `002_ai_and_rate_limits.sql` and `003_limits.sql` in order in the Supabase SQL editor (Primary Database).
+
+Two notes on `003_limits.sql`:
+
+- It sets the CV bucket's size and file-type limits with an `update storage.buckets` statement. If the SQL editor refuses that one statement, set the same limits in Dashboard → Storage → `cvs` → Edit bucket (5 MB; `application/pdf`, `application/msword`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`), delete that statement from the script and run it again. To check the result: `select id, file_size_limit, allowed_mime_types from storage.buckets where id = 'cvs';`
+- Don't re-run `001_init.sql` on its own afterwards: it puts back the old storage upload policy and drops the file cap. Re-running all three, in order, is fine.
+- If an account is already over a cap when the script runs, it keeps what it has (nothing is deleted) and the script prints a notice naming it. That account can edit and delete but not add until it is under the cap.
+- Deploy the app before running the script: the new app saves a CV's record before its file, which the new storage rule requires, and it works with the old rule too.
 
 ## Decisions and trade-offs
 
@@ -164,6 +174,10 @@ The schema is in `supabase/migrations/` and is idempotent. Run `001_init.sql` th
 - Company notes in the Insights tab are device-only and not tied to an account, so signing out leaves them in the browser.
 - Sync is last-write-wins with no live updates between open devices. An edit made while offline can be overwritten by the cloud copy at the next sign-in, and a job deleted while offline can reappear.
 - Live AI is off on the hosted site, and the AI features have so far only been tested with unit tests against a faked network. I haven't run the evals against the real API, so I'm not publishing any accuracy numbers.
+- The limits trim what is *sent to the cloud*, and the cloud copy wins at the next sign-in: a job's notes longer than 20,000 characters end up cut off on every device, including the one that wrote them. (Real job postings are far shorter.) A CV can be at most 5 MB.
+- **The caps are per account, not per project.** Each account is bounded, but nothing limits how many accounts exist, so enough sign-ups could still fill the free tier. Supabase's own email limits slow that down, and turning off public sign-ups in the dashboard (Authentication) would stop it.
+- **The 20-file cap can be got around by someone determined.** Supabase checks the upload rule when an upload link is requested, not again when the file arrives, so scripting "create a record, request a link, delete the record, repeat" can park more files than the cap. Each file is still limited to 5 MB. A nightly clean-up of files that have no CV record would close this; I haven't built it.
+- The limits bound the data that is *kept*, not the space the database sets aside while rewriting it; it reclaims that space on its own schedule.
 - Scanned PDFs and legacy `.doc` CVs can't be analysed.
 - The free Supabase plan pauses projects after about a week without activity.
 

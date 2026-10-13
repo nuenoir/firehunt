@@ -2,8 +2,9 @@
 // POST: assess how well one of the user's CVs fits one job, with evidence-backed
 // strengths, honest gaps, tailored bullets and an outreach draft.
 //
-// Order matters: authenticate -> validate input -> read + parse the CV -> spend
-// guard -> model call. Cheap failures happen before any quota is consumed, and the
+// Order matters: authenticate -> validate input -> read the CV -> check its size ->
+// parse it -> spend guard -> model call. Cheap failures happen before any quota is
+// consumed, and nothing is parsed until the file is known to be a sane size. The
 // CV is read through the signed-in user's own session, so row-level security means
 // nobody can ever analyse someone else's file.
 
@@ -13,7 +14,10 @@ import { getAdminClient } from "@/lib/server/admin";
 import { consumeAiQuota } from "@/lib/server/aiQuota";
 import { tooManyRequests } from "@/lib/server/rateLimit";
 import { AI_NOT_ENABLED, llmErrorResponse } from "@/lib/server/aiHttp";
+import { readJsonLimited } from "@/lib/server/body";
 import { extractCvText } from "@/lib/cvText";
+import { formatBytes } from "@/lib/cvs";
+import { LIMITS } from "@/lib/limits";
 import { callClaude } from "@/lib/ai/llm";
 import { runFitAnalysis } from "@/lib/ai/service";
 import {
@@ -26,8 +30,10 @@ import {
 export const maxDuration = 60;
 
 const BodySchema = z.object({
-  title: z.string().max(300),
-  company: z.string().max(300),
+  // The same limits as the database stores (lib/limits.ts), so a long page title that
+  // saved fine can still be analysed.
+  title: z.string().max(LIMITS.job.title),
+  company: z.string().max(LIMITS.job.company),
   description: z.string(),
   cvId: z.uuid(),
   contacts: z
@@ -50,9 +56,11 @@ export async function POST(request: Request) {
     return Response.json(AI_NOT_ENABLED, { status: 503 });
   }
 
+  const raw = await readJsonLimited(request, LIMITS.aiRequestBytes);
+  if (!raw.ok) return Response.json({ error: raw.error }, { status: raw.status });
   let body: z.infer<typeof BodySchema>;
   try {
-    body = BodySchema.parse(await request.json());
+    body = BodySchema.parse(raw.data);
   } catch {
     return Response.json({ error: "Invalid request." }, { status: 400 });
   }
@@ -94,6 +102,19 @@ export async function POST(request: Request) {
     return Response.json(
       { error: "Couldn't load that CV file. Try re-uploading it." },
       { status: 404 },
+    );
+  }
+
+  // Check the file's REAL size before handing it to the PDF / Word parsers. The "size"
+  // column on the cvs row is written by the browser, so it can say anything; the
+  // downloaded file cannot lie about its own length. Refusing here also keeps an
+  // oversize file from costing the user an AI analysis.
+  if (blob.size > LIMITS.cvFileBytes) {
+    return Response.json(
+      {
+        error: `This CV file is too large to analyse (${formatBytes(blob.size)}). CV files can be at most ${formatBytes(LIMITS.cvFileBytes)}. Upload a smaller PDF or .docx.`,
+      },
+      { status: 413 },
     );
   }
 

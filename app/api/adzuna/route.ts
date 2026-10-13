@@ -5,8 +5,19 @@
 
 import { mapAdzunaResults } from "@/lib/adzuna";
 import { enforceSearchLimits } from "@/lib/server/searchLimits";
+import { parseAdzunaSearch } from "@/lib/server/searchParams";
 
 export async function GET(request: Request) {
+  // Check the query string FIRST. This endpoint is public and puts our secret key on
+  // the upstream request, so nothing the caller typed may reach that URL unchecked
+  // (a made-up "country" could otherwise steer the call at a different Adzuna
+  // endpoint). Doing it before the rate limiter also means junk costs no database
+  // round-trip.
+  const search = parseAdzunaSearch(new URL(request.url).searchParams);
+  if (!search.ok) {
+    return Response.json({ error: search.error }, { status: search.status });
+  }
+
   // Protect the shared Adzuna quota (per visitor and site-wide).
   const limited = await enforceSearchLimits(request, "adzuna");
   if (limited) return limited;
@@ -25,16 +36,12 @@ export async function GET(request: Request) {
     );
   }
 
-  const { searchParams } = new URL(request.url);
-  const country = (searchParams.get("country") || "au").toLowerCase();
-  const what = searchParams.get("what")?.trim() || "";
-  const where = searchParams.get("where")?.trim() || "";
-  const page = searchParams.get("page") || "1";
-  const sort = searchParams.get("sort") || ""; // "date" surfaces newer, more varied roles
+  const { country, what, where, page, sort } = search;
 
-  // Build the Adzuna request URL with our secret credentials attached.
+  // Build the Adzuna request URL with our secret credentials attached. Only the
+  // validated values are used (and still encoded, as a second line of defence).
   const adzunaUrl = new URL(
-    `https://api.adzuna.com/v1/api/jobs/${country}/search/${page}`,
+    `https://api.adzuna.com/v1/api/jobs/${encodeURIComponent(country)}/search/${encodeURIComponent(page)}`,
   );
   adzunaUrl.searchParams.set("app_id", appId);
   adzunaUrl.searchParams.set("app_key", appKey);

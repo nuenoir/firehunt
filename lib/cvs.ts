@@ -1,6 +1,8 @@
 // lib/cvs.ts
 // Pure types + helpers for CVs. No React, no browser APIs here.
 
+import { LIMITS } from "./limits";
+
 export type CvRole = "consulting" | "tech" | "strategy" | "general";
 
 export interface CvRoleMeta {
@@ -38,7 +40,8 @@ export const CV_ROLES: CvRoleMeta[] = [
 export type CvMeta = { id: string; name: string; role: CvRole };
 
 export const ACCEPTED_CV_EXTENSIONS = [".pdf", ".doc", ".docx"];
-export const MAX_CV_BYTES = 10 * 1024 * 1024; // 10 MB
+// The largest CV the cloud accepts. One number for the whole app: lib/limits.ts.
+export const MAX_CV_BYTES = LIMITS.cvFileBytes;
 
 export function roleLabel(id: CvRole): string {
   return CV_ROLES.find((r) => r.id === id)?.label ?? id;

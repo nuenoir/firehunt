@@ -320,3 +320,70 @@ describe("known-id storage", () => {
     expect(loadKnownIds("jobs", "u")).toBeNull();
   });
 });
+
+// An account that is at its job limit: a batch that would add jobs past the cap is
+// refused whole (like the real database does), and deletes always work.
+function makeCappedCloud(cap: number) {
+  const rows = new Map<string, Job>();
+  const api: JobCloud = {
+    fetch: async () => [...rows.values()].map((j) => structuredClone(j)),
+    upsert: async (jobs) => {
+      const added = jobs.filter((j) => !rows.has(j.id)).length;
+      if (rows.size + added > cap) {
+        throw Object.assign(
+          new Error(`FireHunt limit: an account can keep at most ${cap} jobs. Delete some to add more.`),
+          { code: "54000" },
+        );
+      }
+      for (const j of jobs) rows.set(j.id, structuredClone(j));
+    },
+    remove: async (ids) => {
+      for (const id of ids) rows.delete(id);
+    },
+  };
+  return { rows, api };
+}
+
+describe("an account at its job limit", () => {
+  it("lets the user free room by deleting jobs: deletes are sent before the refused add", async () => {
+    const cloud = makeCappedCloud(3);
+    const laptop = new Device(cloud.api);
+    await laptop.signIn();
+    for (const id of ["a", "b", "c"]) await laptop.add(job(id));
+    expect([...cloud.rows.keys()].sort()).toEqual(["a", "b", "c"]);
+
+    // The 4th job is refused, and stays pending on this device.
+    await expect(laptop.add(job("d"))).rejects.toMatchObject({ code: "54000" });
+    expect([...cloud.rows.keys()].sort()).toEqual(["a", "b", "c"]);
+
+    // The user follows the advice and deletes a job. With the upsert going first the
+    // pending add would be refused again and the delete never sent: the cloud would
+    // stay full forever.
+    laptop.jobs = laptop.jobs.filter((j) => j.id !== "a");
+    await laptop.sync();
+    expect([...cloud.rows.keys()].sort()).toEqual(["b", "c", "d"]);
+  });
+
+  it("still shows the cloud's jobs at sign-in when this device's own jobs do not fit", async () => {
+    const cloud = makeCappedCloud(3);
+    const laptop = new Device(cloud.api);
+    await laptop.signIn();
+    for (const id of ["a", "b", "c"]) await laptop.add(job(id)); // the account is full
+
+    const phone = new Device(cloud.api);
+    phone.addWhileOffline(job("x")); // made on the phone before it ever synced
+    const result = await phone.signIn();
+
+    // Nothing is hidden: the phone sees its own job AND the account's three.
+    expect(phone.ids()).toEqual(["a", "b", "c", "x"]);
+    expect(result.uploadError).toMatchObject({ code: "54000" });
+    // The job that did not go up is not recorded as synced, so it is retried...
+    expect(phone.known?.has("x")).toBe(false);
+    expect(planPush(phone.jobs, phone.lastPushed).toUpsert.map((j) => j.id)).toEqual(["x"]);
+    // ...and once there is room, it goes up.
+    laptop.jobs = laptop.jobs.filter((j) => j.id !== "a");
+    await laptop.sync();
+    await phone.signIn();
+    expect([...cloud.rows.keys()].sort()).toEqual(["b", "c", "x"]);
+  });
+});

@@ -22,6 +22,12 @@ import {
   type CvRecord,
 } from "@/lib/cvStore";
 import { supabase } from "@/lib/supabase";
+import { LIMITS } from "@/lib/limits";
+import {
+  canonicalCvMime,
+  describeLimitError,
+  isCvUploadable,
+} from "@/lib/limitGuards";
 import { ensureLocalDataOwner } from "@/lib/localData";
 import { reconcileCvs } from "@/lib/syncMerge";
 import { loadKnownIds, saveKnownIds } from "@/lib/syncKnown";
@@ -121,6 +127,11 @@ export default function CvManager() {
           const localOnly = local.filter((c) => toUpload.has(c.id));
           const uploaded: string[] = [];
           for (const c of localOnly) {
+            // Don't send what the cloud would refuse anyway (the account is full, or
+            // the file is too big / not a PDF or Word file): it just stays on this
+            // device. Nothing in this loop may throw.
+            if (remote.length + uploaded.length >= LIMITS.cvsPerUser) break;
+            if (!isCvUploadable(c.name, c.blob?.size)) continue;
             try {
               await uploadRemoteCv({
                 userId: user.id,
@@ -128,7 +139,6 @@ export default function CvManager() {
                 name: c.name,
                 role: c.role,
                 type: c.type,
-                size: c.size,
                 dateAdded: c.dateAdded,
                 blob: c.blob,
               });
@@ -137,6 +147,7 @@ export default function CvManager() {
               /* keep going; it stays available locally and retries next time */
             }
           }
+          const uploadedIds = new Set(uploaded);
           // Remember what is now in sync (failed uploads are left out to retry).
           saveKnownIds("cvs", user.id, [...remote.map((r) => r.id), ...uploaded]);
           const map = new Map<string, CvItem>();
@@ -160,7 +171,8 @@ export default function CvManager() {
               type: c.type,
               size: c.size,
               dateAdded: c.dateAdded,
-              path: cvStoragePath(user.id, c.id),
+              // Only claim a cloud copy when the upload really happened.
+              path: uploadedIds.has(c.id) ? cvStoragePath(user.id, c.id) : undefined,
               hasLocalBlob: true,
             });
           }
@@ -203,14 +215,25 @@ export default function CvManager() {
       return;
     }
     if (file.size > MAX_CV_BYTES) {
-      setError("That file is larger than 10 MB. Please upload a smaller CV.");
+      setError(
+        `That file is larger than ${formatBytes(MAX_CV_BYTES)}. Please upload a smaller CV.`,
+      );
+      return;
+    }
+    // Signed in: the account can only keep so many CVs in the cloud. Say so now,
+    // rather than uploading the file and having the cloud turn it away.
+    if (supabase && user && items.filter((c) => c.path).length >= LIMITS.cvsPerUser) {
+      setError(
+        `You've reached the limit of ${LIMITS.cvsPerUser} CVs. Delete one before uploading another.`,
+      );
       return;
     }
     const record: CvRecord = {
       id: crypto.randomUUID(),
       name: file.name,
       role,
-      type: file.type,
+      // Browsers often report "" for Word files; the name tells us the real type.
+      type: canonicalCvMime(file.name) ?? file.type,
       size: file.size,
       dateAdded: new Date().toISOString(),
       blob: file,
@@ -225,7 +248,6 @@ export default function CvManager() {
           name: record.name,
           role: record.role,
           type: record.type,
-          size: record.size,
           dateAdded: record.dateAdded,
           blob: file,
         });
@@ -242,9 +264,12 @@ export default function CvManager() {
         hasLocalBlob: true,
       };
       setItems((prev) => [item, ...prev]);
-    } catch {
+    } catch (err) {
+      // If the cloud said no because of a limit, say which one; otherwise the
+      // generic message.
       setError(
-        "Could not save the file. Your browser storage may be full, or the upload failed.",
+        describeLimitError(err, "cv-upload") ??
+          "Could not save the file. Your browser storage may be full, or the upload failed.",
       );
     }
   }

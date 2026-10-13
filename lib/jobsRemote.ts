@@ -8,6 +8,7 @@ import type { Job, JobStatus } from "./jobs";
 import type { StoredContact } from "./contacts";
 import type { StoredAnalysis } from "./ai/schemas";
 import { supabase } from "./supabase";
+import { clampJobForCloud } from "./limitGuards";
 
 export interface JobRow {
   id: string;
@@ -47,7 +48,11 @@ export function fromRow(r: JobRow): Job {
   };
 }
 
-export function toRow(j: Job, userId: string) {
+export function toRow(job: Job, userId: string) {
+  // Trim anything over the database's limits first. Jobs are saved to the cloud in
+  // one batch and the database rejects a batch if any single row breaks a limit, so
+  // one overlong note would otherwise stop every job from syncing.
+  const j = clampJobForCloud(job);
   return {
     id: j.id,
     user_id: userId,
